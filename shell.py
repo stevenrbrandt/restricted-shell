@@ -19,33 +19,42 @@ env = {}
 pidtable = {}
 
 def do_redir(g):
-    if g.groupCount() == 2:
-        if g.group(0).getPatternName() == "op" and g.group(1).group(0).getPatternName() == "fname":
-            op = g.group(0).substring()
-            fname = os.path.realpath(g.group(1).substring())
+    redir_fd = 1
+    out_fds = [PIPE, PIPE]
+    ind = 0
+    if g.groupCount() == 3:
+        if g.group(0).getPatternName() == "fd":
+            ind = 1
+            redir_fd = int(g.group(0).substring())
+    if g.groupCount() == 2+ind:
+        if g.group(ind).getPatternName() == "op" and g.group(ind+1).group(0).getPatternName() == "fname":
+            op = g.group(ind).substring()
+            fname = os.path.realpath(g.group(ind+1).substring())
             if fname.endswith(".log") or fname == "/dev/null":
                 if op == ">":
                     if verbose:
-                        print("Open '%s' for write." % g.group(1).substring())
+                        print("Open '%s' for write." % fname)
                     try:
-                        return open(fname,"w")
+                        out_fds[redir_fd-1] = open(fname,"w")
+                        return out_fds
                     except:
                         if verbose:
                             print(colored("Write failed","red"))
                         return PIPE
                 elif op == ">>":
                     if verbose:
-                        print("Open '%s' for append." % g.group(1).substring())
+                        print("Open '%s' for append." % fname)
                     try:
-                        return open(fname,"a")
+                        out_fds[redir_fd-1] = open(fname,"a")
+                        return out_fds
                     except:
                         if verbose:
                             print(colored("Append failed","red"))
-                        return PIPE
+                        return out_fds
             else:
                 if verbose:
                     print("Open for: '%s' is denied." % fname)
-                return PIPE
+                return out_fds
 
     # Failure case
     print(g.dump())
@@ -96,10 +105,10 @@ def run_shell(g,show_output=True):
         cmd = g.group(istart).substring()
         args = [cmd]
         background = False
-        redir = PIPE
+        out_fd, err_fd = PIPE, PIPE
         for i in range(istart+1,g.groupCount()):
             if g.group(i).getPatternName() == "redir":
-                redir = do_redir(g.group(i))
+                out_fd, err_fd = do_redir(g.group(i))
             elif g.group(i).getPatternName() == "background":
                 background = True
             else:
@@ -114,7 +123,7 @@ def run_shell(g,show_output=True):
                 dir = os.getcwd()
             if verbose:
                 print(colored(args,"yellow"))
-            p = Popen(args, cwd=dir, stdout=redir, stderr=PIPE, universal_newlines=True)
+            p = Popen(args, cwd=dir, stdout=out_fd, stderr=err_fd, universal_newlines=True)
             if background:
                 pidtable[str(p.pid)] = p
                 if "!" in env:
@@ -134,6 +143,8 @@ def run_shell(g,show_output=True):
                 # This will be true for a file redirect
                 if o is None:
                     o = ""
+                if e is None:
+                    e = ""
 
                 env["?"] = str(p.returncode)
                 if show_output:
@@ -162,7 +173,7 @@ arg=("{dquote}"|'{squote}'|{fname}|{var}|{shell})
 env={name}={arg}
 #background=&[ \t]
 background=&(?!&)
-cmd=({env} )*({name})( {arg})*( {redir}|)( {background}|)
+cmd=({env} )*({name})( ({redir}|{arg}))*( {background}|)
 join=;|\|\||&&
 fd=[0-2]
 out={fname}|&{fd}
@@ -178,6 +189,7 @@ for txt in [
         'echo A && echo B & ',
         'echo A &',
         'echo $HOME >> test.log',
+        'echo $(date) >> err.log',
         'A="x"echo "hi"',
         'A="x"echo hi',
         'A="x"echo hi$(echo hi)',
