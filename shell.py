@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from Piraha import parse_peg_src, Matcher
 from subprocess import Popen, PIPE, STDOUT
 import os
@@ -9,7 +10,7 @@ verbose = False
 sftp = "/home/sbrandt/install/openssh/libexec/sftp-server"
 sftp_alt = os.environ.get("SFTP",None)
 
-exe_dir = os.environ.get("EXE_DIR",os.path.join(os.environ["HOME"],"exe"))
+exe_dir = re.sub(r'/*$','/',os.environ.get("EXE_DIR",os.path.join(os.environ["HOME"],"exe")))
 
 functable = {}
 
@@ -148,7 +149,14 @@ def run_shell(g,show_output=True):
                 args += [arg_eval(g.group(i))]
         out_fd, err_fd, dest = out_fds
         if args[0] == "cd":
-            env["PWD"] = args[1]
+            cwd = os.path.realpath(args[1])
+            hpat = re.sub(r'/*$','',os.environ["HOME"]) + '/[\w\.-]+'
+            wpat = '/work/'
+            if re.match(hpat, cwd) or re.match(wpat, cwd):
+                env["PWD"] = cwd
+                os.chdir(cwd)
+            else:
+                assert False, "Bad directory for cd: '%s'" % cwd
         else:
             if args[0] not in ["date", "echo", "sleep", "chmod", "sh", "ls", "set", sftp]:
                 raise Exception("Illegal command '%s'" % args[0])
@@ -295,12 +303,7 @@ pp = parse_peg_src(grammar)
 
 already_ran = set()
 
-def run_script(fname):
-    fname = os.path.realpath(fname)
-    assert fname not in already_ran, "Cannot re-run script '%s'" % fname
-    already_ran.add(fname)
-    with open(fname,"r") as fd:
-        txt = fd.read()
+def run_text(txt):
     m = Matcher(*pp, txt)
     if m.matches():
         if verbose:
@@ -311,7 +314,31 @@ def run_script(fname):
         m.showError()
         raise Exception("syntax error")
 
+def run_script(fname):
+    fname = os.path.realpath(fname)
+    assert fname not in already_ran, "Cannot re-run script '%s'" % fname
+    already_ran.add(fname)
+    with open(fname,"r") as fd:
+        txt = fd.read()
+    run_text(txt)
+
+done = False
 for f in sys.argv[1:]:
     if f == "-c":
         continue
     run_script(f)
+    done = True
+if done:
+    exit(0)
+
+ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()
+if ssh_cmd != "":
+    run_text(ssh_cmd)
+    exit(0)
+
+while True:
+    try:
+        line = input()
+    except EOFError:
+        exit(0)
+    run_text(line)
