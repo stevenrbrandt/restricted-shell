@@ -1,9 +1,18 @@
 from Piraha import parse_peg_src, Matcher
-from subprocess import Popen, PIPE
+from subprocess import Popen, PIPE, STDOUT
 import os
 import sys
+import re
 
-verbose = True
+verbose = False
+
+functable = {}
+
+def check_ename(name):
+    if name.startswith("AGAVE_"):
+        return
+    if re.match(r'[A-Z0-9_]+$', name):
+        raise Exception("Cannot set '%s'" % name)
 
 if sys.stdout.isatty():
     try:
@@ -16,6 +25,8 @@ else:
         return txt
 
 env = {}
+for nm in ["USER", "HOME", "PATH", "PYTHONPATH", "LD_LIBRARY_PATH"]:
+    env[nm]=os.environ.get(nm,"")
 pidtable = {}
 
 def do_redir(g):
@@ -27,7 +38,10 @@ def do_redir(g):
             ind = 1
             redir_fd = int(g.group(0).substring())
     if g.groupCount() == 2+ind:
-        if g.group(ind).getPatternName() == "op" and g.group(ind+1).group(0).getPatternName() == "fname":
+        if g.group(ind).getPatternName() == "op" and g.group(ind+1).group(0).getPatternName() == "fd":
+            assert g.group(ind+1).group(0).substring() == "2"
+            return [PIPE, STDOUT]
+        elif g.group(ind).getPatternName() == "op" and g.group(ind+1).group(0).getPatternName() == "arg":
             op = g.group(ind).substring()
             fname = os.path.realpath(g.group(ind+1).substring())
             if fname.endswith(".log") or fname == "/dev/null":
@@ -86,7 +100,7 @@ def arg_eval(g):
 
 def run_shell(g,show_output=True):
     p  = g.getPatternName()
-    if p in ["cmd0", "expr"]:
+    if p in ["cmd0", "expr", "all", "line", "lines"]:
         for i in range(g.groupCount()):
             run_shell(g.group(i))
     elif p in ["shell"]:
@@ -99,8 +113,9 @@ def run_shell(g,show_output=True):
                 break
             istart += 1
             ename = e.group(0).substring()
+            check_ename(ename)
             enval = arg_eval(e.group(1))
-            env[ename] = eval
+            env[ename] = enval
                 
         cmd = g.group(istart).substring()
         args = [cmd]
@@ -116,14 +131,22 @@ def run_shell(g,show_output=True):
         if args[0] == "cd":
             env["PWD"] = args[1]
         else:
-            if args[0] == "sh":
+            if args[0] not in ["date", "echo", "sleep", "chmod"]:
                 args = ["echo"]+args
+            if args[0] == "chmod":
+                assert args[1] == "+x"
+                assert re.match(r'^.*\.ipcexe$', args[2])
             dir = env.get("PWD",os.getcwd())
             if not os.path.exists(dir):
                 dir = os.getcwd()
+                os.chdir(dir)
             if verbose:
                 print(colored(args,"yellow"))
-            p = Popen(args, cwd=dir, stdout=out_fd, stderr=err_fd, universal_newlines=True)
+            my_env = os.environ.copy()
+            for k in env:
+                if re.match(r'^\w+$', k):
+                    my_env[k] = env[k]
+            p = Popen(args, env=my_env, cwd=dir, stdout=out_fd, stderr=err_fd, universal_newlines=True)
             if background:
                 pidtable[str(p.pid)] = p
                 if "!" in env:
@@ -140,6 +163,11 @@ def run_shell(g,show_output=True):
             else:
                 o, e = p.communicate()
 
+                # Redirect to stderr
+                if out_fd == PIPE and err_fd == STDOUT:
+                    e = o
+                    o = ""
+
                 # This will be true for a file redirect
                 if o is None:
                     o = ""
@@ -148,19 +176,36 @@ def run_shell(g,show_output=True):
 
                 env["?"] = str(p.returncode)
                 if show_output:
-                    print(o)
-                    if e.strip() != "":
-                        print(colored(e,"red"))
-                return o.strip()
+                    o = o.rstrip()
+                    e = e.rstrip()
+                    if o != "":
+                        print(o)
+                    if e != "":
+                        if sys.stderr.isatty():
+                            print(colored(e,"red"),file=sys.stderr)
+                        else:
+                            print(e,file=sys.stderr)
+                return o
     elif p == "join":
         return ""
     elif p == "redir":
         return ""
+    elif p == "func":
+        fname = g.group(0).substring()
+        print("function",colored(fname, "green"),"is defined")
+        functable[fname] = g
+    elif p == "setenv":
+        ename = g.group(0).substring()
+        check_ename(ename)
+        enval = arg_eval(g.group(1))
+        env[ename] = enval
+    elif p in ["comment", "blank"]:
+        pass
     else:
         raise Exception(g.getPatternName())
 
 grammar = r"""
-skipper=\b(\n\\|[ \t])*
+skipper=\b[ \t]*
 shell=\$\( {cmd} \)
 name=[a-zA-Z][a-zA-Z0-9_-]*
 fname=[+/a-zA-Z0-9_\.-]+
@@ -173,46 +218,35 @@ arg=("{dquote}"|'{squote}'|{fname}|{var}|{shell})
 env={name}={arg}
 #background=&[ \t]
 background=&(?!&)
+comment=\#.*
+blank=[ \t]*
 cmd=({env} )*({name})( ({redir}|{arg}))*( {background}|)
+export=export {name}={arg}
+setenv={name}={arg}
 join=;|\|\||&&
 fd=[0-2]
-out={fname}|&{fd}
+out={arg}|&{fd}
 op=>>?
 redir=({fd}|) {op} {out}
-expr={cmd}( {-join} {cmd})*
-cmd0=^ {expr} $
+expr={cmd}( {-join} {cmd})*( {join}|)
+s=[ \t\r\n]*
+func=function {name} \( \){-s}*\{{-s}{lines}{-s}\} ({redir}|)*
+line=( ({comment}|{export}|{func}|{expr}|{setenv}|{blank}) (\n|$))
+lines={line}*
+all=^{lines}$
 """
 pp = parse_peg_src(grammar)
-for txt in [
-        'echo A & && echo B',
-        'echo A && echo B',
-        'echo A && echo B & ',
-        'echo A &',
-        'echo $HOME >> test.log',
-        'echo $(date) >> err.log',
-        'A="x"echo "hi"',
-        'A="x"echo hi',
-        'A="x"echo hi$(echo hi)',
-        'chmod +x hello-world-kfqib6kiraeixqifue6k.ipcexe',
-        'echo 1;echo 2;echo 3',
-        'echo 1>/x ;echo 2;echo 3',
-        r'''echo >> /work/.agave.log  ;cd /work/sbrandt''',
-        r'''printf "[%s] %b\n" $(date '+%Y-%m-%dT%H:%M:%S%z') "$(echo 'No startup script defined. Skipping...')" >> /work/sbrandt/tg457049/job-1a56a844-b144-4866-b554-17cbb5b922e7-007-hello-world-kfqib6kiraeixqifue6k/.agave.log  ;cd /work/sbrandt/tg457049/job-1a56a844-b144-4866-b554-17cbb5b922e7-007-hello-world-kfqib6kiraeixqifue6k''',
-        'echo "---END---;PROCESS=1615414985396;EXITCODE=$?"echo "---BEGIN---"',
-        'echo >> /work/sbrandt/tg457049/job-1a56a844-b144-4866-b554-17cbb5b922e7-007-hello-world-kfqib6kiraeixqifue6k/.agave.log',
-        ' cd /work/sbrandt/tg457049/job-1a56a844-b144-4866-b554-17cbb5b922e7-007-hello-world-kfqib6kiraeixqifue6k',
-        r'''printf "[%s] %b\n" $(date '+%Y-%m-%dT%H:%M:%S%z') "$(echo 'No startup script defined. Skipping...')"''',
-        r'''printf "[%s] %b\n" $(date '+%Y-%m-%dT%H:%M:%S%z')"$(echo 'No startup script defined. Skipping...')"''',
-        r''' echo "---BEGIN---"; uname; echo "---END---;PROCESS=1615414985396;EXITCODE=$?"''',
-        r'''echo "---BEGIN---"; printf "[%s] %b\n" $(date '+%Y-%m-%dT%H:%M:%S%z') "$(echo 'No startup script defined. Skipping...')" >> /work/sbrandt/tg457049/job-1a56a844-b144-4866-b554-17cbb5b922e7-007-hello-world-kfqib6kiraeixqifue6k/.agave.log  ;  cd /work/sbrandt/tg457049/job-1a56a844-b144-4866-b554-17cbb5b922e7-007-hello-world-kfqib6kiraeixqifue6k &&  chmod +x hello-world-kfqib6kiraeixqifue6k.ipcexe > /dev/null  &&  sh -c './hello-world-kfqib6kiraeixqifue6k.ipcexe 2> hello-world-kfqib6kiraeixqifue6k.err 1> hello-world-kfqib6kiraeixqifue6k.out &  export AGAVE_PID=$! &&  if [ -n "$(ps -o comm= -p $AGAVE_PID)" ] || [ -e hello-world-kfqib6kiraeixqifue6k.pid ]; then  echo $AGAVE_PID;  else  cat hello-world-kfqib6kiraeixqifue6k.err;  fi'; echo "---END---;PROCESS=1615414985415;EXITCODE=$?"''',
-        "echo $(date '+%Y-%m-%dT%H:%M:%S%z')",
-        "date '+%Y-%m-%dT%H:%M:%S%z'",
-        'echo X 2>/dev/null'
-        ]:
+
+for f in sys.argv[1:]:
+    if f == "-c":
+        continue
+    with open(f,"r") as fd:
+        txt = fd.read()
     m = Matcher(*pp, txt)
     if m.matches():
-        print(colored(txt,"cyan"))
-        print(colored(m.gr.dump(),"magenta"))
+        if verbose:
+            print(colored(txt,"cyan"))
+        #print(colored(m.gr.dump(),"magenta"))
         run_shell(m.gr)
     else:
         m.showError()
