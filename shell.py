@@ -6,6 +6,9 @@ import re
 
 verbose = False
 
+sftp = "/home/sbrandt/install/openssh/libexec/sftp-server"
+sftp_alt = os.environ.get("SFTP",None)
+
 exe_dir = os.environ.get("EXE_DIR",os.path.join(os.environ["HOME"],"exe"))
 
 functable = {}
@@ -147,8 +150,11 @@ def run_shell(g,show_output=True):
         if args[0] == "cd":
             env["PWD"] = args[1]
         else:
-            if args[0] not in ["date", "echo", "sleep", "chmod", "sh", "ls", "set"]:
+            if args[0] not in ["date", "echo", "sleep", "chmod", "sh", "ls", "set", sftp]:
                 raise Exception("Illegal command '%s'" % args[0])
+            if args[0] == sftp:
+                args[0] = sftp_alt
+                assert sftp_alt is not None, "Please set environment variable SFTP"
             if args[0] == "set":
                 assert args[1] in ["+x","-x"]
                 if args[1] == "+x":
@@ -270,7 +276,7 @@ env={name}={arg}
 background=&(?!&)
 comment=\#.*
 blank=[ \t]*
-cmd=({env} )*({name})( ({redir}|{arg}))*( {background}|)
+cmd=({env} )*({fname})( ({redir}|{arg}))*( {background}|)
 export=export {name}={arg}
 setenv={name}={arg}
 join=;|\|\||&&
