@@ -6,6 +6,8 @@ import re
 
 verbose = False
 
+exe_dir = os.environ.get("EXE_DIR",os.path.join(os.environ["HOME"],"exe"))
+
 functable = {}
 
 def check_ename(name):
@@ -29,9 +31,10 @@ for nm in ["USER", "HOME", "PATH", "PYTHONPATH", "LD_LIBRARY_PATH"]:
     env[nm]=os.environ.get(nm,"")
 pidtable = {}
 
+out_fds = [PIPE, PIPE, "1"]
+
 def do_redir(g):
     redir_fd = 1
-    out_fds = [PIPE, PIPE]
     ind = 0
     if g.groupCount() == 3:
         if g.group(0).getPatternName() == "fd":
@@ -39,8 +42,17 @@ def do_redir(g):
             redir_fd = int(g.group(0).substring())
     if g.groupCount() == 2+ind:
         if g.group(ind).getPatternName() == "op" and g.group(ind+1).group(0).getPatternName() == "fd":
-            assert g.group(ind+1).group(0).substring() == "2"
-            return [PIPE, STDOUT]
+            dest = g.group(ind+1).group(0).substring() 
+            if dest == "2":
+                out_fds[1] = STDOUT
+                out_fds[2] = "2"
+                return
+            elif dest == "1":
+                out_fds[1] = STDOUT
+                out_fds[2] = "1"
+                return
+            else:
+                assert False
         elif g.group(ind).getPatternName() == "op" and g.group(ind+1).group(0).getPatternName() == "arg":
             op = g.group(ind).substring()
             fname = os.path.realpath(g.group(ind+1).substring())
@@ -50,25 +62,25 @@ def do_redir(g):
                         print("Open '%s' for write." % fname)
                     try:
                         out_fds[redir_fd-1] = open(fname,"w")
-                        return out_fds
+                        return
                     except:
                         if verbose:
                             print(colored("Write failed","red"))
-                        return PIPE
+                        return
                 elif op == ">>":
                     if verbose:
                         print("Open '%s' for append." % fname)
                     try:
                         out_fds[redir_fd-1] = open(fname,"a")
-                        return out_fds
+                        return
                     except:
                         if verbose:
                             print(colored("Append failed","red"))
-                        return out_fds
+                        return
             else:
                 if verbose:
                     print("Open for: '%s' is denied." % fname)
-                return out_fds
+                return
 
     # Failure case
     print(g.dump())
@@ -99,6 +111,7 @@ def arg_eval(g):
     raise Exception(g.getPatternName())
 
 def run_shell(g,show_output=True):
+    global verbose
     p  = g.getPatternName()
     if p in ["cmd0", "expr", "all", "line", "lines"]:
         for i in range(g.groupCount()):
@@ -120,22 +133,54 @@ def run_shell(g,show_output=True):
         cmd = g.group(istart).substring()
         args = [cmd]
         background = False
-        out_fd, err_fd = PIPE, PIPE
+        out_fds[0] = PIPE
+        out_fds[1] = PIPE
+        out_fds[2] = "1"
         for i in range(istart+1,g.groupCount()):
             if g.group(i).getPatternName() == "redir":
-                out_fd, err_fd = do_redir(g.group(i))
+                do_redir(g.group(i))
             elif g.group(i).getPatternName() == "background":
                 background = True
             else:
                 args += [arg_eval(g.group(i))]
+        out_fd, err_fd, dest = out_fds
         if args[0] == "cd":
             env["PWD"] = args[1]
         else:
-            if args[0] not in ["date", "echo", "sleep", "chmod"]:
-                args = ["echo"]+args
+            if args[0] not in ["date", "echo", "sleep", "chmod", "sh", "ls", "set"]:
+                raise Exception("Illegal command '%s'" % args[0])
+            if args[0] == "set":
+                assert args[1] in ["+x","-x"]
+                if args[1] == "+x":
+                    verbose = True
+                elif args[1] == "-x":
+                    verbose = False
+                return
             if args[0] == "chmod":
                 assert args[1] == "+x"
                 assert re.match(r'^.*\.ipcexe$', args[2])
+            if args[0] == "sh":
+                safe = []
+                unsafe = []
+                minus_c = False
+                for a in args[1:]:
+                    if a == "-c":
+                        minus_c = True
+                    elif os.path.exists(a):
+                        fpath = os.path.realpath(a)
+                        if a.startswith(exe_dir):
+                            safe += [a]
+                        else:
+                            unsafe += [a]
+                    else:
+                        assert False, "Bad argument to sh '%s'" % a
+                if len(safe) > 0 and len(unsafe) > 0:
+                    raise Exception("Mixture of safe and unsafe scripts")
+                if len(safe) == 0 and len(unsafe) > 0:
+                    for script in unsafe:
+                        run_script(script)
+                    return
+                            
             dir = env.get("PWD",os.getcwd())
             if not os.path.exists(dir):
                 dir = os.getcwd()
@@ -165,8 +210,12 @@ def run_shell(g,show_output=True):
 
                 # Redirect to stderr
                 if out_fd == PIPE and err_fd == STDOUT:
-                    e = o
-                    o = ""
+                    if dest == "2":
+                        e = o
+                        o = ""
+                    elif dest == "1":
+                        o = e
+                        e = ""
 
                 # This will be true for a file redirect
                 if o is None:
@@ -237,10 +286,13 @@ all=^{lines}$
 """
 pp = parse_peg_src(grammar)
 
-for f in sys.argv[1:]:
-    if f == "-c":
-        continue
-    with open(f,"r") as fd:
+already_ran = set()
+
+def run_script(fname):
+    fname = os.path.realpath(fname)
+    assert fname not in already_ran, "Cannot re-run script '%s'" % fname
+    already_ran.add(fname)
+    with open(fname,"r") as fd:
         txt = fd.read()
     m = Matcher(*pp, txt)
     if m.matches():
@@ -250,4 +302,9 @@ for f in sys.argv[1:]:
         run_shell(m.gr)
     else:
         m.showError()
-        break
+        raise Exception("syntax error")
+
+for f in sys.argv[1:]:
+    if f == "-c":
+        continue
+    run_script(f)
