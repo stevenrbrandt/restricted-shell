@@ -240,8 +240,9 @@ def run_shell(g,show_output=True):
     elif p == "redir":
         return ""
     elif p == "func":
+        # At present, functions are parsed, not executed
+        # Maybe that's all we'll ever do with them.
         fname = g.group(0).substring()
-        print("function",colored(fname, "green"),"is defined")
         functable[fname] = g
     elif p == "setenv":
         ename = g.group(0).substring()
