@@ -234,7 +234,6 @@ def run_cmd(args, out_fds, background,show_output):
         if re.match(r'^\w+$', k):
             my_env[k] = env[k]
     if short_circuit:
-        #print("short_circuit:",args)
         return ""
     p = Popen(args, env=my_env, cwd=dir, stdout=out_fd, stderr=err_fd, universal_newlines=True)
     if background:
@@ -349,9 +348,9 @@ def run_shell(g,show_output=True):
         env[ename] = enval
     elif p in ["eol"]:
         endtok = g.group(0).substring()
-        lastcode = 1
-        if "?" in env and env["?"] == 0:
-            lastcode = 0
+        lastcode = 0
+        if "?" in env and env["?"] != "0":
+            lastcode = 1
         if lastcode == 0 and endtok == "||":
             short_circuit = True
         elif lastcode != 0 and endtok == "&&":
