@@ -8,6 +8,7 @@ from traceback import print_exc
 
 verbose = False
 if_stack = []
+short_circuit = False
 
 sftp = "/usr/libexec/openssh/sftp-server"
 sftp_alt = os.environ.get("SFTP",None)
@@ -89,7 +90,7 @@ def do_redir(g):
                 return
 
     # Failure case
-    print(g.dump())
+    print("FAIL:",g.dump())
     exit(0)
 
 def arg_eval(g):
@@ -99,10 +100,12 @@ def arg_eval(g):
         for i in range(g.groupCount()):
             arg_str += arg_eval(g.group(i))
         return arg_str
-    elif p in ["char", "fname", "squote"]:
+    elif p in ["char", "fname", "squote", "startsquare", "endsquare"]:
         return g.substring()
     elif p == "shell":
-        return run_shell(g.group(0),show_output=False)
+        r = run_shell(g.group(0),show_output=False)
+        assert r is not None, g.dump()
+        return r
     elif p == "var":
         if g.substring() == "$?":
             return env["?"]
@@ -140,12 +143,147 @@ def eval_truth(g):
             return len(arg) != 0
         elif fflag == "z":
             return len(arg) == 0
-    print(g.dump())
+    print("FAIL:",g.dump())
     exit(0)
 
-def run_shell(g,show_output=True):
+def run_cmd(args, out_fds, background,show_output):
     global verbose, if_stack
+    out_fd, err_fd, dest = out_fds
+    if args[0] not in ["date", "echo", "sleep", "chmod", \
+            "sh", "ls", "set", sftp, "exit", "cat","uname", \
+            "cp","printf", "if", "then", "else", "fi", "[", \
+            "true", "false"]:
+        raise Exception("Illegal command '%s'" % args[0])
+    if args[0] == "if":
+        if_stack += [-1]
+        run_cmd(args[1:], out_fds, background, show_output)
+        if_stack[-1] = int(env["?"])
+        return ""
+    elif args[0] == "then":
+        assert if_stack[-1] in [0,1], "then without if"
+        if_stack[-1] += 2
+        args = args[1:]
+        if len(args) == 0:
+            return ""
+    elif args[0] == "else":
+        assert if_stack[-1] in [2,3], "else without then"
+        if_stack[-1] += 2
+        args = args[1:]
+        if len(args) == 0:
+            return ""
+    elif args[0] == "fi":
+        assert if_stack[-1] in [2,3,4,5], "fi without if"
+        if_stack = if_stack[:-1]
+        return ""
+    if len(if_stack)>0 and if_stack[-1] in [3,4]:
+        # state 3 means we're inside "then" but the test for "if" failed
+        # state 4 means we're inside "else" but the test for "if" succeeded
+        return ""
+    if args[0] == sftp:
+        assert sftp_alt is not None, "Please set environment variable SFTP"
+        os.execv(sftp_alt,[sftp_alt])
+    if args[0] == "set":
+        assert args[1] in ["+x","-x"]
+        if args[1] == "+x":
+            verbose = True
+        elif args[1] == "-x":
+            verbose = False
+        return ""
+    if args[0] == "chmod":
+        assert args[1] == "+x"
+        assert re.match(r'^.*\.ipcexe$', args[2])
+    if args[0] == "sh":
+        safe = []
+        unsafe = []
+        minus_c = False
+        for a in args[1:]:
+            if a == "-c":
+                minus_c = True
+            elif os.path.exists(a):
+                fpath = os.path.realpath(a)
+                if a.startswith(exe_dir):
+                    safe += [a]
+                else:
+                    unsafe += [a]
+            else:
+                print("PWD:",os.getcwd())
+                assert False, "Bad argument to sh '%s'" % a
+        if len(safe) > 0 and len(unsafe) > 0:
+            raise Exception("Mixture of safe and unsafe scripts")
+        if len(safe) == 0 and len(unsafe) > 0:
+            #for script in unsafe:
+            #    out = run_script(script)
+            #return out
+            args = [sys.executable,sys.argv[0]]+unsafe
+                    
+    dir = env.get("PWD",os.getcwd())
+    if not os.path.exists(dir):
+        dir = os.getcwd()
+        os.chdir(dir)
+    if verbose:
+        print(colored(args,"yellow"))
+    my_env = os.environ.copy()
+    for k in env:
+        if re.match(r'^\w+$', k):
+            my_env[k] = env[k]
+    if short_circuit:
+        #print("short_circuit:",args)
+        return ""
+    p = Popen(args, env=my_env, cwd=dir, stdout=out_fd, stderr=err_fd, universal_newlines=True)
+    if background:
+        pidtable[str(p.pid)] = p
+        if "!" in env:
+            pidstr = env["!"]
+            if verbose:
+                print(colored("waiting","green"),pidstr)
+            if pidstr in pidtable:
+                o2, e2 = pidtable[pidstr].communicate()
+                del pidtable[pidstr]
+                if e2.strip() != "":
+                    if verbose:
+                        print(colored("child error:","red"),e2)
+        env["!"] = str(p.pid)
+    else:
+        o, e = p.communicate()
+        # Redirect to stderr
+        if out_fd == PIPE and err_fd == STDOUT:
+            if dest == "2":
+                e = o
+                o = ""
+            elif dest == "1":
+                o = e
+                e = ""
+        # This will be true for a file redirect
+        if o is None:
+            o = ""
+        if e is None:
+            e = ""
+        env["?"] = str(p.returncode)
+        if len(if_stack) > 0 and if_stack[-1] in [-1,0,1]:
+            if env["?"] == "0":
+                if_stack[-1] = 0
+            else:
+                if_stack[-1] = 1
+            #print("set if_stack:",if_stack[-1],"<-",args,p.returncode)
+        if args[0] == "[":
+            if_stack[-1] = int(env["?"])
+        if show_output:
+            o = o.rstrip()
+            e = e.rstrip()
+            if o != "":
+                print(o)
+            if e != "":
+                if sys.stderr.isatty():
+                    print(colored(e,"red"),file=sys.stderr)
+                else:
+                    print(e,file=sys.stderr)
+        return o
+    return ""
+
+def run_shell(g,show_output=True):
+    global verbose, if_stack, short_circuit
     p  = g.getPatternName()
+    #print("shell:",colored(g.dump(), "magenta"))
     if p in ["cmd0", "expr", "all", "line", "lines"]:
         for i in range(g.groupCount()):
             run_shell(g.group(i))
@@ -187,123 +325,7 @@ def run_shell(g,show_output=True):
             else:
                 assert False, "Bad directory for cd: '%s'" % cwd
         else:
-            if args[0] not in ["date", "echo", "sleep", "chmod", \
-                    "sh", "ls", "set", sftp, "exit", "cat","uname", \
-                    "cp","printf", "if", "then", "else", "fi"]:
-                raise Exception("Illegal command '%s'" % args[0])
-            if args[0] == "if":
-                assert False
-                print("if")
-                if_stack += [0]
-                print(if_stack)
-                return
-            elif args[0] == "then":
-                print("then",if_stack[-1])
-                assert if_stack[-1] in [0,1], "then without if"
-                if_stack[-1] += 2
-                return
-            elif args[0] == "else":
-                assert if_stack[-1] in [2,3], "else without then"
-                if_stack[-1] += 2
-                return
-            elif args[0] == "fi":
-                assert if_stack[-1] in [2,3,4,5], "fi without if"
-                if_stack = if_stack[:-1]
-                return
-            print(if_stack)
-            if len(if_stack)>0 and if_stack[-1] in [3,4]:
-                return
-
-            if args[0] == sftp:
-                assert sftp_alt is not None, "Please set environment variable SFTP"
-                os.execv(sftp_alt,[sftp_alt])
-            if args[0] == "set":
-                assert args[1] in ["+x","-x"]
-                if args[1] == "+x":
-                    verbose = True
-                elif args[1] == "-x":
-                    verbose = False
-                return
-            if args[0] == "chmod":
-                assert args[1] == "+x"
-                assert re.match(r'^.*\.ipcexe$', args[2])
-            if args[0] == "sh":
-                safe = []
-                unsafe = []
-                minus_c = False
-                for a in args[1:]:
-                    if a == "-c":
-                        minus_c = True
-                    elif os.path.exists(a):
-                        fpath = os.path.realpath(a)
-                        if a.startswith(exe_dir):
-                            safe += [a]
-                        else:
-                            unsafe += [a]
-                    else:
-                        print("PWD:",os.getcwd())
-                        assert False, "Bad argument to sh '%s'" % a
-                if len(safe) > 0 and len(unsafe) > 0:
-                    raise Exception("Mixture of safe and unsafe scripts")
-                if len(safe) == 0 and len(unsafe) > 0:
-                    for script in unsafe:
-                        run_script(script)
-                    return
-                            
-            dir = env.get("PWD",os.getcwd())
-            if not os.path.exists(dir):
-                dir = os.getcwd()
-                os.chdir(dir)
-            if verbose:
-                print(colored(args,"yellow"))
-            my_env = os.environ.copy()
-            for k in env:
-                if re.match(r'^\w+$', k):
-                    my_env[k] = env[k]
-            p = Popen(args, env=my_env, cwd=dir, stdout=out_fd, stderr=err_fd, universal_newlines=True)
-            if background:
-                pidtable[str(p.pid)] = p
-                if "!" in env:
-                    pidstr = env["!"]
-                    if verbose:
-                        print(colored("waiting","green"),pidstr)
-                    if pidstr in pidtable:
-                        o2, e2 = pidtable[pidstr].communicate()
-                        del pidtable[pidstr]
-                        if e2.strip() != "":
-                            if verbose:
-                                print(colored("child error:","red"),e2)
-                env["!"] = str(p.pid)
-            else:
-                o, e = p.communicate()
-
-                # Redirect to stderr
-                if out_fd == PIPE and err_fd == STDOUT:
-                    if dest == "2":
-                        e = o
-                        o = ""
-                    elif dest == "1":
-                        o = e
-                        e = ""
-
-                # This will be true for a file redirect
-                if o is None:
-                    o = ""
-                if e is None:
-                    e = ""
-
-                env["?"] = str(p.returncode)
-                if show_output:
-                    o = o.rstrip()
-                    e = e.rstrip()
-                    if o != "":
-                        print(o)
-                    if e != "":
-                        if sys.stderr.isatty():
-                            print(colored(e,"red"),file=sys.stderr)
-                        else:
-                            print(e,file=sys.stderr)
-                return o
+            return run_cmd(args, out_fds, background, show_output)
     elif p == "join":
         return ""
     elif p == "redir":
@@ -318,15 +340,20 @@ def run_shell(g,show_output=True):
         check_ename(ename)
         enval = arg_eval(g.group(1))
         env[ename] = enval
-    elif p in ["comment", "blank"]:
-        pass
+    elif p in ["eol"]:
+        endtok = g.group(0).substring()
+        if env["?"] == "0" and endtok == "||":
+            short_circuit = True
+        elif env["?"] != "0" and endtok == "&&":
+            short_circuit = True
+        else:
+            short_circuit = False
     elif p == "if":
         print("if")
         if eval_truth(g.group(0)):
             if_stack += [0]
         else:
             if_stack += [1]
-        print(if_stack)
     else:
         raise Exception(g.getPatternName())
 
@@ -340,35 +367,32 @@ quoteelem={var}|{shell}|{char}
 char=\\.|[^"]
 dquote={-quoteelem}*
 squote=(\\.|[^'])*
-arg=("{dquote}"|'{squote}'|{fname}|{var}|{shell})
+endsquare=\]
+startsquare=\[
+flag=-[a-z]
+arg=("{dquote}"|'{squote}'|{fname}|{var}|{shell}|{startsquare}|{endsquare}|{flag})
 env={name}={arg}
 #background=&[ \t]
 background=&(?!&)
 comment=\#.*
 blank=[ \t]*
 binop = &&|\|\|
-truth=\[ {test} \]( {binop} \[ {test} \]|)
-fflag=[enz]
-test=(-{fflag} {arg})
-if=if {truth}
-cmd={if}|(({env} )*({fname})( ({redir}|{arg}))*( {background}|))
 export=export {name}={arg}
 setenv={name}={arg}
-join=;|\|\||&&
 fd=[0-2]
 out={arg}|&{fd}
 op=>>?
 redir=({fd}|) {op} {out}
-expr={cmd}( {-join} {cmd})*( {join}|)
 s=[ \t\r\n]*
 func=function {name} \( \){-s}*\{{-s}{lines}{-s}\} ({redir}|)*
-line=( ({comment}|{export}|{func}|{expr}|{setenv}|{blank}) (\n|$))
-lines={line}*
+eol=(\#[^\n]*|){endtok}
+endtok=([\n;]|&&|\|\||$)
 all=^{lines}$
+cmd=(({env} )*{fname}( {arg})*( {redir})*( {background}|))
+line=({cmd}|{setenv}) {eol}
+lines=( {line})*
 """
 pp = parse_peg_src(grammar)
-
-already_ran = set()
 
 def run_text(txt):
     m = Matcher(*pp, txt)
@@ -381,13 +405,16 @@ def run_text(txt):
         m.showError()
         raise Exception("syntax error")
 
+stack = []
 def run_script(fname):
+    global stack
     fname = os.path.realpath(fname)
-    assert fname not in already_ran, "Cannot re-run script '%s'" % fname
-    already_ran.add(fname)
+    assert fname not in stack, "No recursion"
+    stack += [fname]
     with open(fname,"r") as fd:
         txt = fd.read()
     run_text(txt)
+    stack = stack[:-1]
 
 done = False
 for f in sys.argv[1:]:
@@ -396,7 +423,7 @@ for f in sys.argv[1:]:
     run_script(f)
     done = True
 if done:
-    exit(0)
+    exit(int(env["?"]))
 
 def run_text_check(txt):
     home = os.environ["HOME"]
@@ -421,3 +448,5 @@ while True:
     except EOFError:
         exit(0)
     run_text_check(line)
+
+exit(int(env["?"]))
