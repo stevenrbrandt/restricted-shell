@@ -4,10 +4,12 @@ from subprocess import Popen, PIPE, STDOUT
 import os
 import sys
 import re
+from traceback import print_exc
 
 verbose = False
+if_stack = []
 
-sftp = "/home/sbrandt/install/openssh/libexec/sftp-server"
+sftp = "/usr/libexec/openssh/sftp-server"
 sftp_alt = os.environ.get("SFTP",None)
 
 exe_dir = re.sub(r'/*$','/',os.environ.get("EXE_DIR",os.path.join(os.environ["HOME"],"exe")))
@@ -114,8 +116,35 @@ def arg_eval(g):
                 return ""
     raise Exception(g.getPatternName())
 
+def eval_truth(g):
+    p  = g.getPatternName()
+    if p == "truth":
+        if g.groupCount() == 1:
+            return eval_truth(g.group(0))
+        elif g.groupCount() == 3:
+            t1 = eval_truth(g.group(0))
+            binop = g.group(1).substring()
+            t2 = eval_truth(g.group(2))
+            if binop == "&&":
+                return t1 and t2
+            else:
+                return t1 or t2
+    elif p == "test":
+        assert g.group(0).getPatternName() == "fflag"
+        fflag = g.group(0).substring()
+        arg = arg_eval(g.group(1))
+        if fflag == "e":
+            fname = os.path.realpath(arg)
+            return os.path.exists(fname)
+        elif fflag == "n":
+            return len(arg) != 0
+        elif fflag == "z":
+            return len(arg) == 0
+    print(g.dump())
+    exit(0)
+
 def run_shell(g,show_output=True):
-    global verbose
+    global verbose, if_stack
     p  = g.getPatternName()
     if p in ["cmd0", "expr", "all", "line", "lines"]:
         for i in range(g.groupCount()):
@@ -158,11 +187,36 @@ def run_shell(g,show_output=True):
             else:
                 assert False, "Bad directory for cd: '%s'" % cwd
         else:
-            if args[0] not in ["date", "echo", "sleep", "chmod", "sh", "ls", "set", sftp]:
+            if args[0] not in ["date", "echo", "sleep", "chmod", \
+                    "sh", "ls", "set", sftp, "exit", "cat","uname", \
+                    "cp","printf", "if", "then", "else", "fi"]:
                 raise Exception("Illegal command '%s'" % args[0])
+            if args[0] == "if":
+                assert False
+                print("if")
+                if_stack += [0]
+                print(if_stack)
+                return
+            elif args[0] == "then":
+                print("then",if_stack[-1])
+                assert if_stack[-1] in [0,1], "then without if"
+                if_stack[-1] += 2
+                return
+            elif args[0] == "else":
+                assert if_stack[-1] in [2,3], "else without then"
+                if_stack[-1] += 2
+                return
+            elif args[0] == "fi":
+                assert if_stack[-1] in [2,3,4,5], "fi without if"
+                if_stack = if_stack[:-1]
+                return
+            print(if_stack)
+            if len(if_stack)>0 and if_stack[-1] in [3,4]:
+                return
+
             if args[0] == sftp:
-                args[0] = sftp_alt
                 assert sftp_alt is not None, "Please set environment variable SFTP"
+                os.execv(sftp_alt,[sftp_alt])
             if args[0] == "set":
                 assert args[1] in ["+x","-x"]
                 if args[1] == "+x":
@@ -187,6 +241,7 @@ def run_shell(g,show_output=True):
                         else:
                             unsafe += [a]
                     else:
+                        print("PWD:",os.getcwd())
                         assert False, "Bad argument to sh '%s'" % a
                 if len(safe) > 0 and len(unsafe) > 0:
                     raise Exception("Mixture of safe and unsafe scripts")
@@ -265,6 +320,13 @@ def run_shell(g,show_output=True):
         env[ename] = enval
     elif p in ["comment", "blank"]:
         pass
+    elif p == "if":
+        print("if")
+        if eval_truth(g.group(0)):
+            if_stack += [0]
+        else:
+            if_stack += [1]
+        print(if_stack)
     else:
         raise Exception(g.getPatternName())
 
@@ -284,7 +346,12 @@ env={name}={arg}
 background=&(?!&)
 comment=\#.*
 blank=[ \t]*
-cmd=({env} )*({fname})( ({redir}|{arg}))*( {background}|)
+binop = &&|\|\|
+truth=\[ {test} \]( {binop} \[ {test} \]|)
+fflag=[enz]
+test=(-{fflag} {arg})
+if=if {truth}
+cmd={if}|(({env} )*({fname})( ({redir}|{arg}))*( {background}|))
 export=export {name}={arg}
 setenv={name}={arg}
 join=;|\|\||&&
@@ -331,9 +398,21 @@ for f in sys.argv[1:]:
 if done:
     exit(0)
 
+def run_text_check(txt):
+    home = os.environ["HOME"]
+    log_file = os.path.join(home,"log_shell.txt")
+    with open(log_file, "a+") as fd:
+        try:
+            r = run_text(txt)
+            print("Succeeded for text:",txt,file=fd)
+            return r
+        except:
+            print("Failed for text:",txt,file=fd)
+            print_exc(file=fd)
+
 ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()
 if ssh_cmd != "":
-    run_text(ssh_cmd)
+    run_text_check(ssh_cmd)
     exit(0)
 
 while True:
@@ -341,4 +420,4 @@ while True:
         line = input()
     except EOFError:
         exit(0)
-    run_text(line)
+    run_text_check(line)
