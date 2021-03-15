@@ -17,6 +17,13 @@ exe_dir = re.sub(r'/*$','/',os.environ.get("EXE_DIR",os.path.join(os.environ["HO
 
 functable = {}
 
+def Done():
+    if "?" in env:
+        rc = int(env["?"])
+    else:
+        rc = 0
+    exit(rc)
+
 def check_ename(name):
     if name.startswith("AGAVE_"):
         return
@@ -91,7 +98,7 @@ def do_redir(g):
 
     # Failure case
     print("FAIL:",g.dump())
-    exit(0)
+    Done()
 
 def arg_eval(g):
     p  = g.getPatternName()
@@ -144,7 +151,7 @@ def eval_truth(g):
         elif fflag == "z":
             return len(arg) == 0
     print("FAIL:",g.dump())
-    exit(0)
+    Done()
 
 def run_cmd(args, out_fds, background,show_output):
     global verbose, if_stack
@@ -342,9 +349,12 @@ def run_shell(g,show_output=True):
         env[ename] = enval
     elif p in ["eol"]:
         endtok = g.group(0).substring()
-        if env["?"] == "0" and endtok == "||":
+        lastcode = 1
+        if "?" in env and env["?"] == 0:
+            lastcode = 0
+        if lastcode == 0 and endtok == "||":
             short_circuit = True
-        elif env["?"] != "0" and endtok == "&&":
+        elif lastcode != 0 and endtok == "&&":
             short_circuit = True
         else:
             short_circuit = False
@@ -354,6 +364,8 @@ def run_shell(g,show_output=True):
             if_stack += [0]
         else:
             if_stack += [1]
+    elif p == "comment":
+        pass
     else:
         raise Exception(g.getPatternName())
 
@@ -374,7 +386,6 @@ arg=("{dquote}"|'{squote}'|{fname}|{var}|{shell}|{startsquare}|{endsquare}|{flag
 env={name}={arg}
 #background=&[ \t]
 background=&(?!&)
-comment=\#.*
 blank=[ \t]*
 binop = &&|\|\|
 export=export {name}={arg}
@@ -384,13 +395,14 @@ out={arg}|&{fd}
 op=>>?
 redir=({fd}|) {op} {out}
 s=[ \t\r\n]*
-func=function {name} \( \){-s}*\{{-s}{lines}{-s}\} ({redir}|)*
+func=function {name} \( \) \{ (\n )?({line} )*\} ({redir}|)*
 eol=(\#[^\n]*|){endtok}
-endtok=([\n;]|&&|\|\||$)
+endtok=([\n;]+|&&|\|\||$)
 all=^{lines}$
 cmd=(({env} )*{fname}( {arg})*( {redir})*( {background}|))
-line=({cmd}|{setenv}) {eol}
-lines=( {line})*
+comment=\#[^\n']*
+line=({comment}\n|({func}|{cmd}|{setenv}) {eol})
+lines=^( {line})+$
 """
 pp = parse_peg_src(grammar)
 
@@ -423,7 +435,7 @@ for f in sys.argv[1:]:
     run_script(f)
     done = True
 if done:
-    exit(int(env["?"]))
+    Done()
 
 def run_text_check(txt):
     home = os.environ["HOME"]
@@ -440,13 +452,13 @@ def run_text_check(txt):
 ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()
 if ssh_cmd != "":
     run_text_check(ssh_cmd)
-    exit(0)
+    Done()
 
 while True:
     try:
         line = input()
     except EOFError:
-        exit(0)
+        Done()
     run_text_check(line)
 
-exit(int(env["?"]))
+Done()
