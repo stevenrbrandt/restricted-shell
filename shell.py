@@ -6,6 +6,8 @@ import sys
 import re
 from traceback import print_exc
 
+my_shell = os.path.realpath(sys.argv[0])
+
 verbose = False
 if_stack = []
 short_circuit = False
@@ -16,8 +18,12 @@ sftp_alt = os.environ.get("SFTP",None)
 exe_dir = re.sub(r'/*$','/',os.environ.get("EXE_DIR",os.path.join(os.environ["HOME"],"exe")))
 
 functable = {}
+pidtable = {}
 
 def Done():
+    for p in pidtable:
+        o, e = pidtable[p].communicate()
+        print(o,e)
     if "?" in env:
         rc = int(env["?"])
     else:
@@ -43,7 +49,6 @@ else:
 env = {}
 for nm in ["USER", "HOME", "PATH", "PYTHONPATH", "LD_LIBRARY_PATH"]:
     env[nm]=os.environ.get(nm,"")
-pidtable = {}
 
 out_fds = [PIPE, PIPE, "1"]
 
@@ -116,6 +121,10 @@ def arg_eval(g):
     elif p == "var":
         if g.substring() == "$?":
             return env["?"]
+        elif g.substring() == "$!":
+            return env["!"]
+        elif g.substring() == "$$":
+            return str(os.getpid())
         elif g.groupCount() == 1 and g.group(0).getPatternName() == "name":
             name = g.group(0).substring()
             if name in env:
@@ -124,6 +133,8 @@ def arg_eval(g):
                 return os.environ[name]
             else:
                 return ""
+        else:
+            raise Exception(g.substring())
     raise Exception(g.getPatternName())
 
 def eval_truth(g):
@@ -156,10 +167,12 @@ def eval_truth(g):
 def run_cmd(args, out_fds, background,show_output):
     global verbose, if_stack
     out_fd, err_fd, dest = out_fds
+    if re.match(r'.*\.ipcexe$', args[0]):
+        args = ["sh","-c"] + args
     if args[0] not in ["date", "echo", "sleep", "chmod", \
             "sh", "ls", "set", sftp, "exit", "cat","uname", \
             "cp","printf", "if", "then", "else", "fi", "[", \
-            "true", "false"]:
+            "true", "false", "ps"]:
         raise Exception("Illegal command '%s'" % args[0])
     if args[0] == "if":
         if_stack += [-1]
@@ -191,9 +204,9 @@ def run_cmd(args, out_fds, background,show_output):
         os.execv(sftp_alt,[sftp_alt])
     if args[0] == "set":
         assert args[1] in ["+x","-x"]
-        if args[1] == "+x":
+        if args[1] == "-x":
             verbose = True
-        elif args[1] == "-x":
+        elif args[1] == "+x":
             verbose = False
         return ""
     if args[0] == "chmod":
@@ -213,15 +226,14 @@ def run_cmd(args, out_fds, background,show_output):
                 else:
                     unsafe += [a]
             else:
-                print("PWD:",os.getcwd())
-                assert False, "Bad argument to sh '%s'" % a
+                run_text(a)
         if len(safe) > 0 and len(unsafe) > 0:
             raise Exception("Mixture of safe and unsafe scripts")
         if len(safe) == 0 and len(unsafe) > 0:
             #for script in unsafe:
             #    out = run_script(script)
             #return out
-            args = [sys.executable,sys.argv[0]]+unsafe
+            args = [sys.executable,my_shell]+unsafe
                     
     dir = env.get("PWD",os.getcwd())
     if not os.path.exists(dir):
@@ -286,15 +298,24 @@ def run_cmd(args, out_fds, background,show_output):
         return o
     return ""
 
-def run_shell(g,show_output=True):
+def run_shell(g,background=False,show_output=True):
+    assert type(show_output)==bool
+    assert type(background)==bool
     global verbose, if_stack, short_circuit
     p  = g.getPatternName()
-    #print("shell:",colored(g.dump(), "magenta"))
-    if p in ["cmd0", "expr", "all", "line", "lines"]:
+    if p in ["cmd0", "expr", "all", "lines"]:
         for i in range(g.groupCount()):
             run_shell(g.group(i))
+    elif p == "line":
+        bg = False
+        if g.groupCount()==2:
+            if g.group(1).group(0).substring() == "&":
+                bg = True
+        run_shell(g.group(0), bg, show_output)
+        if g.groupCount()==2:
+            run_shell(g.group(1), bg, show_output)
     elif p in ["shell"]:
-        return run_shell(g.group(0))
+        return run_shell(g.group(0),background=background)
     elif p in ["cmd"]:
         istart = 0
         while True:
@@ -309,14 +330,13 @@ def run_shell(g,show_output=True):
                 
         cmd = g.group(istart).substring()
         args = [cmd]
-        background = False
         out_fds[0] = PIPE
         out_fds[1] = PIPE
         out_fds[2] = "1"
         for i in range(istart+1,g.groupCount()):
             if g.group(i).getPatternName() == "redir":
                 do_redir(g.group(i))
-            elif g.group(i).getPatternName() == "background":
+            elif g.group(i).getPatternName() == "eol" and g.group(i).group(0).substring()=="&":
                 background = True
             else:
                 args += [arg_eval(g.group(i))]
@@ -341,7 +361,7 @@ def run_shell(g,show_output=True):
         # Maybe that's all we'll ever do with them.
         fname = g.group(0).substring()
         functable[fname] = g
-    elif p == "setenv":
+    elif p in ["setenv", "export"]:
         ename = g.group(0).substring()
         check_ename(ename)
         enval = arg_eval(g.group(1))
@@ -372,8 +392,8 @@ grammar = r"""
 skipper=\b[ \t]*
 shell=\$\( {cmd} \)
 name=[a-zA-Z][a-zA-Z0-9_-]*
-fname=[+/a-zA-Z0-9_\.-]+
-var=\$(\{{name}\}|{name}|[?!])
+fname=[+/a-zA-Z0-9_\.-]+|\[
+var=\$(\{{name}\}|{name}|[?!$])
 quoteelem={var}|{shell}|{char}
 char=\\.|[^"]
 dquote={-quoteelem}*
@@ -383,8 +403,6 @@ startsquare=\[
 flag=-[a-z]
 arg=("{dquote}"|'{squote}'|{fname}|{var}|{shell}|{startsquare}|{endsquare}|{flag})
 env={name}={arg}
-#background=&[ \t]
-background=&(?!&)
 blank=[ \t]*
 binop = &&|\|\|
 export=export {name}={arg}
@@ -392,15 +410,15 @@ setenv={name}={arg}
 fd=[0-2]
 out={arg}|&{fd}
 op=>>?
-redir=({fd}|) {op} {out}
+redir=(({fd}|) {op} {out}|{fd} {op} ({out}|))
 s=[ \t\r\n]*
-func=function {name} \( \) \{ (\n )?({line} )*\} ({redir}|)*
+func=function {name} \( \) \{ (\n )?({line} )*[\n\r\t ]*\} ({redir}|)*
 eol=(\#[^\n]*|){endtok}
-endtok=([\n;]+|&&|\|\||$)
+endtok=([\n;]+|&&?|\|\||$)
 all=^{lines}$
-cmd=(({env} )*{fname}( {arg})*( {redir})*( {background}|))
-comment=\#[^\n']*
-line=({comment}\n|({func}|{cmd}|{setenv}) {eol})
+cmd=({env} )*{fname}( ({redir}|{arg}))*
+comment=\#[^\n]*[ \t\r\n]*
+line=({comment}|({func}|{export}|{cmd}|{setenv}) {eol})
 lines=^( {line})+$
 """
 pp = parse_peg_src(grammar)
