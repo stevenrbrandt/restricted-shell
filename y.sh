@@ -1,3 +1,4 @@
+#!/home/sbrandt/py/shell/shell.py
 if sh -c ./a.sh && sh -c ./b.sh
 then
     echo A and B

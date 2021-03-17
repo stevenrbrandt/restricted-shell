@@ -112,7 +112,7 @@ def arg_eval(g):
         for i in range(g.groupCount()):
             arg_str += arg_eval(g.group(i))
         return arg_str
-    elif p in ["char", "fname", "squote", "startsquare", "endsquare"]:
+    elif p in ["char", "fname", "squote", "startsquare", "endsquare", "argstr"]:
         return g.substring()
     elif p == "shell":
         r = run_shell(g.group(0),show_output=False)
@@ -172,7 +172,7 @@ def run_cmd(args, out_fds, background,show_output):
     if args[0] not in ["date", "echo", "sleep", "chmod", \
             "sh", "ls", "set", sftp, "exit", "cat","uname", \
             "cp","printf", "if", "then", "else", "fi", "[", \
-            "true", "false", "ps"]:
+            "true", "false", "ps", "sbatch", "squeue", "sacct"]:
         raise Exception("Illegal command '%s'" % args[0])
     if args[0] == "if":
         if_stack += [-1]
@@ -202,6 +202,16 @@ def run_cmd(args, out_fds, background,show_output):
     if args[0] == sftp:
         assert sftp_alt is not None, "Please set environment variable SFTP"
         os.execv(sftp_alt,[sftp_alt])
+    if args[0] == "sbatch":
+        # Force batch files to execute using shell.py
+        src_file = os.path.realpath(args[1]) 
+        with open(src_file, "r") as ffd:
+            src_content = ffd.read()
+        alt_file = src_file + ".sh"
+        with open(alt_file, "w") as ffd:
+            print("#!", my_shell, sep='', file=ffd)
+            print(src_content, file=ffd, end='')
+        args[1] = alt_file
     if args[0] == "set":
         assert args[1] in ["+x","-x"]
         if args[1] == "-x":
@@ -209,6 +219,11 @@ def run_cmd(args, out_fds, background,show_output):
         elif args[1] == "+x":
             verbose = False
         return ""
+    if args[0] == "exit":
+        if len(args) > 1:
+            return args[1]
+        else:
+            return "0"
     if args[0] == "chmod":
         assert args[1] == "+x"
         assert re.match(r'^.*\.ipcexe$', args[2])
@@ -393,6 +408,7 @@ skipper=\b[ \t]*
 shell=\$\( {cmd} \)
 name=[a-zA-Z][a-zA-Z0-9_-]*
 fname=[+/a-zA-Z0-9_\.-]+|\[
+argstr=[=+/a-zA-Z0-9_\.-]+|\[
 var=\$(\{{name}\}|{name}|[?!$])
 quoteelem={var}|{shell}|{char}
 char=\\.|[^"]
@@ -401,7 +417,7 @@ squote=(\\.|[^'])*
 endsquare=\]
 startsquare=\[
 flag=-[a-z]
-arg=("{dquote}"|'{squote}'|{fname}|{var}|{shell}|{startsquare}|{endsquare}|{flag})
+arg=("{dquote}"|'{squote}'|{argstr}|{var}|{shell}|{startsquare}|{endsquare}|{flag})
 env={name}={arg}
 blank=[ \t]*
 binop = &&|\|\|
@@ -455,6 +471,8 @@ if done:
     Done()
 
 def run_text_check(txt):
+    if txt.strip() == "":
+        return ""
     home = os.environ["HOME"]
     log_file = os.path.join(home,"log_shell.txt")
     with open(log_file, "a+") as fd:
