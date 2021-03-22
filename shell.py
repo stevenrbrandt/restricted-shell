@@ -1,10 +1,17 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 from Piraha import parse_peg_src, Matcher
 from subprocess import Popen, PIPE, STDOUT
 import os
 import sys
 import re
 from traceback import print_exc
+
+import io
+home = os.environ["HOME"]
+log_file = os.path.join(home,"log_shell.txt")
+log_fd = io.TextIOWrapper(open(log_file,"ab",0), write_through=True)
+sys.stderr.flush()
+#sys.stderr = open(log_file,"ab",0)
 
 my_shell = os.path.realpath(sys.argv[0])
 
@@ -75,12 +82,12 @@ def do_redir(g):
         elif g.group(ind).getPatternName() == "op" and g.group(ind+1).group(0).getPatternName() == "arg":
             op = g.group(ind).substring()
             fname = os.path.realpath(g.group(ind+1).substring())
-            if fname.endswith(".log") or fname == "/dev/null":
+            if re.match(r'^.*\.(out|err|log)$',fname) or fname == "/dev/null":
                 if op == ">":
                     if verbose:
                         print("Open '%s' for write." % fname)
                     try:
-                        out_fds[redir_fd-1] = open(fname,"w")
+                        out_fds[redir_fd-1] = open(fname,"a")
                         return
                     except:
                         if verbose:
@@ -122,7 +129,7 @@ def arg_eval(g):
         if g.substring() == "$?":
             return env["?"]
         elif g.substring() == "$!":
-            return env["!"]
+            return env.get("!","0")
         elif g.substring() == "$$":
             return str(os.getpid())
         elif g.groupCount() == 1 and g.group(0).getPatternName() == "name":
@@ -172,13 +179,16 @@ def run_cmd(args, out_fds, background,show_output):
     if args[0] not in ["date", "echo", "sleep", "chmod", \
             "sh", "ls", "set", sftp, "exit", "cat","uname", \
             "cp","printf", "if", "then", "else", "fi", "[", \
-            "true", "false", "ps", "sbatch", "squeue", "sacct"]:
+            "true", "false", "ps", "sbatch", "squeue", "sacct", \
+            "exec"]:
         raise Exception("Illegal command '%s'" % args[0])
     if args[0] == "if":
         if_stack += [-1]
         run_cmd(args[1:], out_fds, background, show_output)
         if_stack[-1] = int(env["?"])
         return ""
+    elif args[0] == "exec":
+        pass
     elif args[0] == "then":
         assert if_stack[-1] in [0,1], "then without if"
         if_stack[-1] += 2
@@ -201,6 +211,7 @@ def run_cmd(args, out_fds, background,show_output):
         return ""
     if args[0] == sftp:
         assert sftp_alt is not None, "Please set environment variable SFTP"
+        print("Exec:",sftp_alt,file=log_fd)
         os.execv(sftp_alt,[sftp_alt])
     if args[0] == "sbatch":
         # Force batch files to execute using shell.py
@@ -241,14 +252,31 @@ def run_cmd(args, out_fds, background,show_output):
                 else:
                     unsafe += [a]
             else:
-                run_text(a)
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    save_out = sys.stdout
+                    save_err = sys.stderr
+                    save_dir = os.getcwd()
+                    run_text(a)
+                finally:
+                    sys.stdout.flush()
+                    sys.stdout = save_out
+                    sys.stderr.flush()
+                    sys.stderr = save_err
+                    os.chdir(save_dir)
         if len(safe) > 0 and len(unsafe) > 0:
             raise Exception("Mixture of safe and unsafe scripts")
-        if len(safe) == 0 and len(unsafe) > 0:
+        elif len(safe) == 0 and len(unsafe) > 0:
             #for script in unsafe:
             #    out = run_script(script)
             #return out
             args = [sys.executable,my_shell]+unsafe
+            for u in unsafe:
+                run_script(u)
+            return
+        elif len(safe)==0 and len(unsafe)==0:
+            return
                     
     dir = env.get("PWD",os.getcwd())
     if not os.path.exists(dir):
@@ -262,6 +290,15 @@ def run_cmd(args, out_fds, background,show_output):
             my_env[k] = env[k]
     if short_circuit:
         return ""
+    if args[0] == "exec":
+        # Not sure if this makes sense to do
+        if type(out_fd).__name__ == "TextIOWrapper":
+            sys.stdout.flush()
+            sys.stdout = out_fd
+        if type(err_fd).__name__ == "TextIOWrapper":
+            sys.stderr.flush()
+            sys.stderr = err_fd
+        return
     p = Popen(args, env=my_env, cwd=dir, stdout=out_fd, stderr=err_fd, universal_newlines=True)
     if background:
         pidtable[str(p.pid)] = p
@@ -343,7 +380,7 @@ def run_shell(g,background=False,show_output=True):
             enval = arg_eval(e.group(1))
             env[ename] = enval
                 
-        cmd = g.group(istart).substring()
+        cmd = arg_eval(g.group(istart))
         args = [cmd]
         out_fds[0] = PIPE
         out_fds[1] = PIPE
@@ -432,7 +469,7 @@ func=function {name} \( \) \{ (\n )?({line} )*[\n\r\t ]*\} ({redir}|)*
 eol=(\#[^\n]*|){endtok}
 endtok=([\n;]+|&&?|\|\||$)
 all=^{lines}$
-cmd=({env} )*{fname}( ({redir}|{arg}))*
+cmd=({env} )*{arg}( ({redir}|{arg}))*
 comment=\#[^\n]*[ \t\r\n]*
 line=({comment}|({func}|{export}|{cmd}|{setenv}) {eol})
 lines=^( {line})+$
@@ -448,6 +485,7 @@ def run_text(txt):
         run_shell(m.gr)
     else:
         m.showError()
+        m.showError(sys.stderr)
         raise Exception("syntax error")
 
 stack = []
@@ -473,16 +511,13 @@ if done:
 def run_text_check(txt):
     if txt.strip() == "":
         return ""
-    home = os.environ["HOME"]
-    log_file = os.path.join(home,"log_shell.txt")
-    with open(log_file, "a+") as fd:
-        try:
-            r = run_text(txt)
-            print("Succeeded for text:",txt,file=fd)
-            return r
-        except:
-            print("Failed for text:",txt,file=fd)
-            print_exc(file=fd)
+    try:
+        r = run_text(txt)
+        print("Succeeded for text:",txt,file=log_fd)
+        return r
+    except:
+        print("Failed for text:",txt,file=log_fd)
+        print_exc(file=log_fd)
 
 ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()
 if ssh_cmd != "":
