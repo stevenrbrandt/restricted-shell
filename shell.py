@@ -526,6 +526,8 @@ if ssh_cmd != "":
 
 while True:
     try:
+        if sys.stdout.isatty():
+            print("$ ",end='',flush=True)
         line = input()
     except EOFError:
         Done()
