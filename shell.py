@@ -171,17 +171,143 @@ def eval_truth(g):
     print("FAIL:",g.dump())
     Done()
 
+def safe(args):
+    return args
+
+def chk_chmod(args):
+    assert args[1] == "+x"
+    assert re.match(r'^.*\.ipcexe$', args[2])
+    return args
+
+def chk_access(args):
+    for k in args[1:]:
+        k = os.path.realpath(k)
+        if os.path.exists(k):
+            # Only cat publicly readable files
+            assert os.stat(k).st_mode & 0o400 == 0o400, "Illegal access to '%s'" % k
+        d = os.path.dirname(k)
+        if os.path.exists(d):
+            assert os.stat(d).st_mode & 0o500 == 0o500, "Illegal access to '%s'" % k
+        # block anything in the .ssh directory
+        assert "/.ssh/" not in k, "Illegal access to '%s'" % k
+        # Can't read/write to the exe dir
+        assert not d.starswith(exe_dir), "Illegal access to '%s'" % k
+        # Can't read/write to the home dir
+        assert d != home, "Illegal access to '%s'" % k
+        # No bashrc and possibly other things
+        # Actually, that should be blocked by
+        # restricting access to the home dir.
+        assert os.path.basename(k) not in [".bashrc"], "Illegal access to '%s'" % k
+        # block anything in /etc
+        assert not k.startswith("/etc"), "Illegal access to '%s'" % k
+    return args
+
+def new_sftp(args):
+    assert sftp_alt is not None, "Please set environment variable SFTP"
+    print("Exec:",sftp_alt,file=log_fd)
+    os.execv(sftp_alt,[sftp_alt])
+
+def chk_sbatch(args):
+    # Force batch files to execute using shell.py
+    src_file = os.path.realpath(args[1]) 
+    with open(src_file, "r") as ffd:
+        src_content = ffd.read()
+    alt_file = src_file + ".sh"
+    with open(alt_file, "w") as ffd:
+        print("#!", my_shell, sep='', file=ffd)
+        print(src_content, file=ffd, end='')
+    return [args[0], alt_file]
+
+def chk_set(args):
+    global verbose
+    assert args[1] in ["+x","-x"]
+    if args[1] == "-x":
+        verbose = True
+    elif args[1] == "+x":
+        verbose = False
+    return ["true"]
+
+def chk_sh(args):
+    if short_circuit:
+        return ["true"]
+    safe = []
+    unsafe = []
+    minus_c = False
+    for a in args[1:]:
+        if a == "-c":
+            minus_c = True
+        elif os.path.exists(a):
+            fpath = os.path.realpath(a)
+            if a.startswith(exe_dir):
+                safe += [a]
+            else:
+                unsafe += [a]
+        else:
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+                save_out = sys.stdout
+                save_err = sys.stderr
+                save_dir = os.getcwd()
+                run_text(a)
+            finally:
+                sys.stdout.flush()
+                sys.stdout = save_out
+                sys.stderr.flush()
+                sys.stderr = save_err
+                os.chdir(save_dir)
+    if len(safe) > 0 and len(unsafe) > 0:
+        raise Exception("Mixture of safe and unsafe scripts")
+    elif len(safe) == 0 and len(unsafe) > 0:
+        #for script in unsafe:
+        #    out = run_script(script)
+        #return out
+        args = [sys.executable,my_shell]+unsafe
+        for u in unsafe:
+            run_script(u)
+        if env.get("?","1") == "0":
+            return ["true"]
+        else:
+            if len(if_stack)>0 and if_stack[-1] == 0:
+                if_stack[-1] += 1
+            return ["false"]
+    elif len(safe)==0 and len(unsafe)==0:
+        return ["false"]
+    else:
+        raise Exception()
+
+commands = {
+    "sleep" : safe,
+    "date" : safe,
+    "echo" : safe,
+    "ps" : safe,
+    "true" : safe,
+    "false" : safe,
+    "sacct" : safe,
+    "printf" : safe,
+    "uname" : safe,
+    "chmod" : chk_chmod,
+    "cat" : chk_access,
+    "cp" : chk_access,
+    "if" : safe,
+    "then" : safe,
+    "else" : safe,
+    "fi" : safe,
+    "set" : chk_set,
+    "[" : safe,
+    "exec" : safe,
+    sftp : new_sftp,
+    "sbatch" : chk_sbatch,
+    "sh" : chk_sh,
+}
+
 def run_cmd(args, out_fds, background,show_output):
     global verbose, if_stack
     out_fd, err_fd, dest = out_fds
-    if re.match(r'.*\.ipcexe$', args[0]):
-        args = ["sh","-c"] + args
-    if args[0] not in ["date", "echo", "sleep", "chmod", \
-            "sh", "ls", "set", sftp, "exit", "cat","uname", \
-            "cp","printf", "if", "then", "else", "fi", "[", \
-            "true", "false", "ps", "sbatch", "squeue", "sacct", \
-            "exec"]:
-        raise Exception("Illegal command '%s'" % args[0])
+    #if re.match(r'.*\.ipcexe$', args[0]):
+    #    args = ["sh","-c"] + args
+    assert args[0] in commands, "Illegal command '%s'" % args[0]
+    args = commands[args[0]](args)
     if args[0] == "if":
         if_stack += [-1]
         run_cmd(args[1:], out_fds, background, show_output)
@@ -195,12 +321,16 @@ def run_cmd(args, out_fds, background,show_output):
         args = args[1:]
         if len(args) == 0:
             return ""
+        assert args[0] in commands, "Illegal command '%s'" % args[0]
+        args = commands[args[0]](args)
     elif args[0] == "else":
         assert if_stack[-1] in [2,3], "else without then"
         if_stack[-1] += 2
         args = args[1:]
         if len(args) == 0:
             return ""
+        assert args[0] in commands, "Illegal command '%s'" % args[0]
+        args = commands[args[0]](args)
     elif args[0] == "fi":
         assert if_stack[-1] in [2,3,4,5], "fi without if"
         if_stack = if_stack[:-1]
@@ -209,74 +339,19 @@ def run_cmd(args, out_fds, background,show_output):
         # state 3 means we're inside "then" but the test for "if" failed
         # state 4 means we're inside "else" but the test for "if" succeeded
         return ""
-    if args[0] == sftp:
-        assert sftp_alt is not None, "Please set environment variable SFTP"
-        print("Exec:",sftp_alt,file=log_fd)
-        os.execv(sftp_alt,[sftp_alt])
-    if args[0] == "sbatch":
-        # Force batch files to execute using shell.py
-        src_file = os.path.realpath(args[1]) 
-        with open(src_file, "r") as ffd:
-            src_content = ffd.read()
-        alt_file = src_file + ".sh"
-        with open(alt_file, "w") as ffd:
-            print("#!", my_shell, sep='', file=ffd)
-            print(src_content, file=ffd, end='')
-        args[1] = alt_file
-    if args[0] == "set":
-        assert args[1] in ["+x","-x"]
-        if args[1] == "-x":
-            verbose = True
-        elif args[1] == "+x":
-            verbose = False
-        return ""
+    if args[0] == "true":
+        env["?"]="0"
+        return "0"
+    if args[0] == "false":
+        env["?"]="1"
+        return "1"
     if args[0] == "exit":
         if len(args) > 1:
-            return args[1]
+            rcode = args[1]
         else:
-            return "0"
-    if args[0] == "chmod":
-        assert args[1] == "+x"
-        assert re.match(r'^.*\.ipcexe$', args[2])
-    if args[0] == "sh":
-        safe = []
-        unsafe = []
-        minus_c = False
-        for a in args[1:]:
-            if a == "-c":
-                minus_c = True
-            elif os.path.exists(a):
-                fpath = os.path.realpath(a)
-                if a.startswith(exe_dir):
-                    safe += [a]
-                else:
-                    unsafe += [a]
-            else:
-                try:
-                    sys.stdout.flush()
-                    sys.stderr.flush()
-                    save_out = sys.stdout
-                    save_err = sys.stderr
-                    save_dir = os.getcwd()
-                    run_text(a)
-                finally:
-                    sys.stdout.flush()
-                    sys.stdout = save_out
-                    sys.stderr.flush()
-                    sys.stderr = save_err
-                    os.chdir(save_dir)
-        if len(safe) > 0 and len(unsafe) > 0:
-            raise Exception("Mixture of safe and unsafe scripts")
-        elif len(safe) == 0 and len(unsafe) > 0:
-            #for script in unsafe:
-            #    out = run_script(script)
-            #return out
-            args = [sys.executable,my_shell]+unsafe
-            for u in unsafe:
-                run_script(u)
-            return
-        elif len(safe)==0 and len(unsafe)==0:
-            return
+            rcode = "0"
+        env["?"] = rcode
+        return rcode
                     
     dir = env.get("PWD",os.getcwd())
     if not os.path.exists(dir):
@@ -519,18 +594,21 @@ def run_text_check(txt):
         print("Failed for text:",txt,file=log_fd)
         print_exc(file=log_fd)
 
-ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()
-if ssh_cmd != "":
-    run_text_check(ssh_cmd)
+def main():
+    ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()
+    if ssh_cmd != "":
+        run_text_check(ssh_cmd)
+        Done()
+
+    while True:
+        try:
+            if sys.stdout.isatty():
+                print("$ ",end='',flush=True)
+            line = input()
+        except EOFError:
+            Done()
+        run_text_check(line)
     Done()
 
-while True:
-    try:
-        if sys.stdout.isatty():
-            print("$ ",end='',flush=True)
-        line = input()
-    except EOFError:
-        Done()
-    run_text_check(line)
-
-Done()
+if __name__ == "__main__":
+    main()
