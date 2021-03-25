@@ -299,6 +299,7 @@ commands = {
     sftp : new_sftp,
     "sbatch" : chk_sbatch,
     "sh" : chk_sh,
+    "bash" : chk_sh,
 }
 
 def run_cmd(args, out_fds, background,show_output):
