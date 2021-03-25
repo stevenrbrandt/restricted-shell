@@ -6,6 +6,10 @@ import sys
 import re
 from traceback import print_exc
 
+class ExitShell(Exception):
+    def __init__(self, rc):
+        self.rc = rc
+
 import io
 home = os.environ["HOME"]
 log_file = os.path.join(home,"log_shell.txt")
@@ -249,7 +253,14 @@ def chk_sh(args):
                 save_out = sys.stdout
                 save_err = sys.stderr
                 save_dir = os.getcwd()
-                run_text(a)
+                try:
+                    run_text(a)
+                except ExitShell as e:
+                    print("Caught")
+                    if env["?"] == 0:
+                        return ["true"]
+                    else:
+                        return ["false"]
             finally:
                 sys.stdout.flush()
                 sys.stdout = save_out
@@ -264,7 +275,10 @@ def chk_sh(args):
         #return out
         args = [sys.executable,my_shell]+unsafe
         for u in unsafe:
-            run_script(u)
+            try:
+                run_script(u)
+            except ExitShell:
+                pass
         if env.get("?","1") == "0":
             return ["true"]
         else:
@@ -275,6 +289,13 @@ def chk_sh(args):
         return ["false"]
     else:
         raise Exception()
+
+def do_exit(args):
+    if len(args) > 0:
+        env["?"] = args[1]
+    else:
+        env["?"] = "0"
+    raise ExitShell(env["?"])
 
 commands = {
     "sleep" : safe,
@@ -300,13 +321,12 @@ commands = {
     "sbatch" : chk_sbatch,
     "sh" : chk_sh,
     "bash" : chk_sh,
+    "exit" : do_exit,
 }
 
 def run_cmd(args, out_fds, background,show_output):
     global verbose, if_stack
     out_fd, err_fd, dest = out_fds
-    #if re.match(r'.*\.ipcexe$', args[0]):
-    #    args = ["sh","-c"] + args
     assert args[0] in commands, "Illegal command '%s'" % args[0]
     args = commands[args[0]](args)
     if args[0] == "if":
@@ -346,13 +366,6 @@ def run_cmd(args, out_fds, background,show_output):
     if args[0] == "false":
         env["?"]="1"
         return "1"
-    if args[0] == "exit":
-        if len(args) > 1:
-            rcode = args[1]
-        else:
-            rcode = "0"
-        env["?"] = rcode
-        return rcode
                     
     dir = env.get("PWD",os.getcwd())
     if not os.path.exists(dir):
@@ -568,7 +581,8 @@ stack = []
 def run_script(fname):
     global stack
     fname = os.path.realpath(fname)
-    assert fname not in stack, "No recursion"
+    #assert fname not in stack, "No recursion"
+    assert len(stack) < 20, "Recursion limit exceeded"
     stack += [fname]
     with open(fname,"r") as fd:
         txt = fd.read()
@@ -579,7 +593,10 @@ done = False
 for f in sys.argv[1:]:
     if f == "-c":
         continue
-    run_script(f)
+    try:
+        run_script(f)
+    except ExitShell:
+        pass
     done = True
 if done:
     Done()
@@ -591,9 +608,15 @@ def run_text_check(txt):
         r = run_text(txt)
         print("Succeeded for text:",txt,file=log_fd)
         return r
+    except ExitShell as e:
+        Done()
     except:
-        print("Failed for text:",txt,file=log_fd)
-        print_exc(file=log_fd)
+        if sys.stdout.isatty():
+            print("Failed for text:",txt)
+            print_exc()
+        else:
+            print("Failed for text:",txt,file=log_fd)
+            print_exc(file=log_fd)
 
 def main():
     ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()

@@ -1,2 +1,2 @@
 echo A
-true
+exit 0

@@ -1,2 +1,3 @@
 echo B
-false
+exit 1
+echo NOT THIS
