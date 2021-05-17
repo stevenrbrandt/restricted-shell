@@ -590,16 +590,6 @@ def run_script(fname):
     stack = stack[:-1]
 
 done = False
-for f in sys.argv[1:]:
-    if f == "-c":
-        continue
-    try:
-        run_script(f)
-    except ExitShell:
-        pass
-    done = True
-if done:
-    Done()
 
 def run_text_check(txt):
     if txt.strip() == "":
@@ -619,6 +609,18 @@ def run_text_check(txt):
             print_exc(file=log_fd)
 
 def main():
+    done = False
+    for f in sys.argv[1:]:
+        if f == "-c":
+            continue
+        try:
+            run_script(f)
+        except ExitShell:
+            pass
+        done = True
+    if done:
+        Done()
+
     ssh_cmd = os.environ.get("SSH_ORIGINAL_COMMAND","").strip()
     if ssh_cmd != "":
         run_text_check(ssh_cmd)
