@@ -34,10 +34,13 @@ pidtable = {}
 
 def unesc(s):
     n = ''
-    for i in range(len(s)):
+    i = 0
+    while i < len(s):
         c = s[i]
-        if c == '\\':
-            c2 = s[i+1]
+        i += 1
+        if i < len(s) and c == '\\':
+            c2 = s[i]
+            i += 1
             if c2 == 'n':
                 n += '\n'
             elif c2 == 'r':
