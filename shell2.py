@@ -112,9 +112,31 @@ def process_line(line,pc):
                 assert g, line[1]
                 vartable[g.group(1)]=g.group(2)
             else:
-                p = Popen(line, stdout=PIPE, stderr=PIPE, universal_newlines=True)
+                output_stream = PIPE
+                error_stream = PIPE
+                input_stream = open("/dev/null","r")
+                new_line = []
+                i = 0
+                while i < len(line):
+                    item = line[i]
+                    i += 1
+                    if item == ">":
+                        fname = line[i]
+                        i += 1
+                        output_stream = open(fname,"a+")
+                    else:
+                        new_line += [item]
+
+                p = Popen(new_line, 
+                    stdout=output_stream,
+                    stderr=error_stream,
+                    stdin=input_stream,
+                    universal_newlines=True)
                 out, err = p.communicate()
-                print(out, end='')
+                if out is not None:
+                    print(out, end='')
+                if err is not None:
+                    print(err, end='', file=sys.stderr)
                 #print(err, end='')
 
 def process_input(input):
