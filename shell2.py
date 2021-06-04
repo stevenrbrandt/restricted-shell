@@ -68,16 +68,19 @@ def explode(item):
 
 in_for = False
 in_do = False
+in_if = False
 for_stack = []
 program = []
 
 def process_line(line,pc):
-    global in_for, in_do, program, for_stack, vartable
+    global in_for, in_do, program, for_stack, vartable, in_if
     #print(">>",pc,line)
     line = [explode(item) for item in line]
     if len(line) == 0:
         return
-    if line[0] == "for":
+    if line[0] == "if":
+        process_line(line[1:], pc)
+    elif line[0] == "for":
         in_for = True
         vname = line[1]
         assert re.match(r'^[a-zA-Z_]', vname), 'vname = "%s"' % vname
@@ -110,6 +113,10 @@ def process_line(line,pc):
             if line[0] == "export":
                 g = re.match(r'(\w+)=(.*)', line[1])
                 assert g, line[1]
+                vartable[g.group(1)]=g.group(2)
+            elif re.search(r'=', line[0]):
+                g = re.match(r'(\w+)=(.*)', line[0])
+                assert g, line[0]
                 vartable[g.group(1)]=g.group(2)
             else:
                 output_stream = PIPE
@@ -151,11 +158,13 @@ def process_input(input):
         elif g.group(3) is not None:
             word += unesc(g.group(3))
         elif item in [" ", "\t"]:
-            line += [word]
+            if word != "":
+                line += [word]
             word = ""
         elif item in ["&&", "&", "||", ";", "\n"]:
             if word != "":
                 line += [word]
+                print("add word:",word)
                 word = ''
             line += [item]
             lines += [line]
