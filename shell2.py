@@ -37,6 +37,7 @@ in_do = False
 in_if = False
 for_stack = []
 program = []
+last_ending = "\n"
 
 def unesc(s):
     n = ''
@@ -72,18 +73,31 @@ def explode(item):
     s += item[pos:]
     return s
 
+def save_ending(line):
+    global last_ending
+    if len(line)>0 and line[-1] in ["&&", "||", "\n"]:
+        last_ending = line[-1]
+        line = line[:-1]
+    else:
+        last_ending = "\n"
+    return line
+
 def process_line(line,pc):
-    global in_for, in_do, program, for_stack, vartable, in_if, if_stack
-    #print(">>",pc,line)
+    global in_for, in_do, program, for_stack, vartable, in_if, if_stack, last_ending
+
+
+    #print(">>",line,"LE:",last_ending.strip())
     line = [explode(item) for item in line]
     if len(line) == 0:
         return
     if line[0] == "if":
         if_stack += [0]
         process_line(line[1:], pc)
-        if_stack[-1] = vartable.get("?",1)
         return
     elif line[0] == "then":
+        if_stack[-1] = vartable.get("?",1)
+        #print("Then update ifstack:",if_stack)
+        #print("then:",if_stack[-1])
         if if_stack[-1] == 0:
             process_line(line[1:], pc)
         return
@@ -92,6 +106,7 @@ def process_line(line,pc):
             if_stack[-1] = 1
         else:
             if_stack[-1] = 0
+        #print("Else update ifstack:",if_stack)
         if if_stack[-1] == 0:
             process_line(line[1:], pc)
         return
@@ -99,6 +114,12 @@ def process_line(line,pc):
         if_stack = if_stack[:-1]
         return
 
+    if last_ending == "&&" and vartable.get("?",1) != 0:
+        line = save_ending(line)
+        return
+    line = save_ending(line)
+
+    #print(">>if_stack:",if_stack)
     if len(if_stack) > 0 and if_stack[-1] != 0:
         pass
     elif line[0] == "for":
@@ -166,6 +187,7 @@ def process_line(line,pc):
                 if err is not None:
                     print(err, end='', file=sys.stderr)
                 vartable["?"] = p.returncode
+                #print("cmd:",new_line,"=>",p.returncode)
                 #print(err, end='')
 
 def process_input(input):
