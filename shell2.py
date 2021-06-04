@@ -117,6 +117,9 @@ def process_line(line,pc):
     if last_ending == "&&" and vartable.get("?",1) != 0:
         line = save_ending(line)
         return
+    if last_ending == "||" and vartable.get("?",1) == 0:
+        line = save_ending(line)
+        return
     line = save_ending(line)
 
     #print(">>if_stack:",if_stack)
