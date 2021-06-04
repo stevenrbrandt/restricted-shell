@@ -32,6 +32,12 @@ vartable = { "word":"WORD", "?":"0" }
 functable = {}
 pidtable = {}
 
+in_for = False
+in_do = False
+in_if = False
+for_stack = []
+program = []
+
 def unesc(s):
     n = ''
     i = 0
@@ -66,20 +72,35 @@ def explode(item):
     s += item[pos:]
     return s
 
-in_for = False
-in_do = False
-in_if = False
-for_stack = []
-program = []
-
 def process_line(line,pc):
-    global in_for, in_do, program, for_stack, vartable, in_if
+    global in_for, in_do, program, for_stack, vartable, in_if, if_stack
     #print(">>",pc,line)
     line = [explode(item) for item in line]
     if len(line) == 0:
         return
     if line[0] == "if":
+        if_stack += [0]
         process_line(line[1:], pc)
+        if_stack[-1] = vartable.get("?",1)
+        return
+    elif line[0] == "then":
+        if if_stack[-1] == 0:
+            process_line(line[1:], pc)
+        return
+    elif line[0] == "else":
+        if if_stack[-1] == 0:
+            if_stack[-1] = 1
+        else:
+            if_stack[-1] = 0
+        if if_stack[-1] == 0:
+            process_line(line[1:], pc)
+        return
+    elif line[0] == "fi":
+        if_stack = if_stack[:-1]
+        return
+
+    if len(if_stack) > 0 and if_stack[-1] != 0:
+        pass
     elif line[0] == "for":
         in_for = True
         vname = line[1]
@@ -144,6 +165,7 @@ def process_line(line,pc):
                     print(out, end='')
                 if err is not None:
                     print(err, end='', file=sys.stderr)
+                vartable["?"] = p.returncode
                 #print(err, end='')
 
 def process_input(input):
@@ -164,7 +186,7 @@ def process_input(input):
         elif item in ["&&", "&", "||", ";", "\n"]:
             if word != "":
                 line += [word]
-                print("add word:",word)
+                #print("add word:",word)
                 word = ''
             line += [item]
             lines += [line]
