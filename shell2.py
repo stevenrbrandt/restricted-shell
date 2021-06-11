@@ -5,6 +5,7 @@ import os
 import sys
 import re
 from traceback import print_exc
+from termcolor import colored
 
 class ExitShell(Exception):
     def __init__(self, rc):
@@ -38,6 +39,7 @@ in_if = False
 for_stack = []
 program = []
 last_ending = "\n"
+the_input = ""
 
 def unesc(s):
     n = ''
@@ -75,7 +77,7 @@ def explode(item):
 
 def save_ending(line):
     global last_ending
-    if len(line)>0 and line[-1] in ["&&", "||", "\n"]:
+    if len(line)>0 and line[-1] in ["&&", "||", "\n", "|", "&"]:
         last_ending = line[-1]
         line = line[:-1]
     else:
@@ -83,7 +85,7 @@ def save_ending(line):
     return line
 
 def process_line(line,pc):
-    global in_for, in_do, program, for_stack, vartable, in_if, if_stack, last_ending
+    global in_for, in_do, program, for_stack, vartable, in_if, if_stack, last_ending, the_input
 
 
     #print(">>",line,"LE:",last_ending.strip())
@@ -166,7 +168,7 @@ def process_line(line,pc):
             else:
                 output_stream = PIPE
                 error_stream = PIPE
-                input_stream = open("/dev/null","r")
+                input_stream = PIPE
                 new_line = []
                 i = 0
                 while i < len(line):
@@ -184,13 +186,20 @@ def process_line(line,pc):
                     stderr=error_stream,
                     stdin=input_stream,
                     universal_newlines=True)
-                out, err = p.communicate()
+                #print("using input: ","[",the_input,"]",sep="",end=' ')
+                #print(new_line)
+                out, err = p.communicate(the_input)
+                #print("out:",colored(out,"green"))
+                the_input = ""
                 if out is not None:
-                    print(out, end='')
+                    if last_ending == "|":
+                        the_input = out
+                    else:
+                        print(out, end='')
                 if err is not None:
                     print(err, end='', file=sys.stderr)
                 vartable["?"] = p.returncode
-                #print("cmd:",new_line,"=>",p.returncode)
+                #print("cmd:",new_line,"=>",p.returncode,last_ending)
                 #print(err, end='')
 
 def process_input(input):
@@ -198,9 +207,11 @@ def process_input(input):
     lines = []
     line = []
     word = ""
-    for g in re.finditer(r'"((\\.|[^"\\])*)"|\'((\\.|[^\'\\])*)\'|&&|\|\||\w+|.|\n', input.strip()):
+    for g in re.finditer(r'"((\\.|[^"\\])*)"|\'((\\.|[^\'\\])*)\'|&&|\|\||\w+|#.*|.|\n', input.strip()):
         item = g.group(0)
-        if g.group(1) is not None:
+        if re.match(r'^\s*#', item):
+            pass
+        elif g.group(1) is not None:
             word += unesc(g.group(1))
         elif g.group(3) is not None:
             word += unesc(g.group(3))
@@ -208,7 +219,7 @@ def process_input(input):
             if word != "":
                 line += [word]
             word = ""
-        elif item in ["&&", "&", "||", ";", "\n"]:
+        elif item in ["&&", "&", "||", "|", ";", "\n"]:
             if word != "":
                 line += [word]
                 #print("add word:",word)
@@ -229,6 +240,11 @@ def process_input(input):
         program += [line]
         process_line(line,pc)
 
-for a in sys.argv[1:]:
+args = sys.argv[1:]
+vartable["0"] = sys.argv[0]
+for i in range(len(args)):
+    a = args[i]
     with open(a,"r") as fd:
+        vartable["*"] = " ".join(args[i+1:])
         process_input(fd.read())
+        break
