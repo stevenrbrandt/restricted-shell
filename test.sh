@@ -1,4 +1,4 @@
-for i in 1 2 3 4 5 6 7
+for i in 1 2 3 4 5 6 7 8
 do
     bash ex${i}.sh x y z> x1
     python3 ./shell2.py ex${i}.sh > x2
