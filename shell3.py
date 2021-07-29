@@ -111,6 +111,7 @@ class Quote:
 class Command:
     def __init__(self, ty="exec"):
         self.args = []
+        self.trimmed = False
         self.end = None
         self.redirects = []
         self.end_symbol = None
@@ -128,13 +129,18 @@ class Command:
         assert re.match(r'^\w+$',self.type)
 
     def trim(self):
+        self.trimmed = True
         while len(self.args) > 0 and isinstance(self.args[0],Space):
             self.args = self.args[1:]
         while len(self.args) > 0 and isinstance(self.args[-1],Space):
             self.args = self.args[:-1]
 
     def pr(self,indent=0):
-        print(" "*indent,"Command:",sep='')
+        if self.trimmed:
+            tr = "*"
+        else:
+            tr = ""
+        print(" "*indent,"Command",tr,":",sep='')
         print(" "*indent,"  type: ",self.type,sep='')
         print(" "*indent,"  args=[",sep='')
         for i in range(len(self.args)):
@@ -184,27 +190,31 @@ class Shell:
         while i < argc:
             arg = args[i]
             if arg == "[[":
-                unit_type += [["[[",Command()]]
-                unit_type[-1][1].args += [arg]
+                unit_type += [["[[",Command(arg)]]
+                #unit_type[-1][1].args += [arg]
             elif arg == "[":
-                unit_type += [["[",Command()]]
-                unit_type[-1][1].args += [arg]
+                unit_type += [["[",Command(arg)]]
+                #unit_type[-1][1].args += [arg]
             elif arg == "]]":
                 assert unit_type[-1][0] == "[["
-                unit_type[-1][1].args += [arg]
+                #unit_type[-1][1].args += [arg]
                 cur = unit_type[-1][1]
+                cur.trim()
                 unit_type = unit_type[:-1]
                 unit_type[-1][1].args += [cur]
             elif arg == "]":
                 assert unit_type[-1][0] == "[", str(unit_type)
-                unit_type[-1][1].args += [arg]
+                #unit_type[-1][1].args += [arg]
                 cur = unit_type[-1][1]
+                cur.trim()
                 unit_type = unit_type[:-1]
                 unit_type[-1][1].args += [cur]
             elif arg in ['$((']:
                 #unit_type[-1][1].args += [arg]
                 unit_type += [[arg,Command(arg)]]
-            elif arg in ['(','$(']:
+            elif arg == '(' and unit_type[-1][1].type != "test2":
+                unit_type += [[arg,Command(arg)],["",Command()]]
+            elif arg == '$(':
                 #unit_type[-1][1].args += [arg]
                 unit_type += [[arg,Command(arg)],["",Command()]]
             #elif arg == '$(':
@@ -213,23 +223,25 @@ class Shell:
             #elif arg == '$((':
             #    unit_type += [["$((",Command()]]
             #    unit_type[-1][1].args += [arg]
-            elif arg == ')':
+            elif arg == ')' and unit_type[-1][1].type != "test2":
                 cur = unit_type[-1][1]
                 cur.trim()
                 ut = unit_type[-1][0]
                 if ut == '$((':
                     assert i+1 < argc and args[i+1] == ')'
                     i += 1
-                    arg = '))'
+                    utb = False
+                else:
+                    utb = True
                 unit_type = unit_type[:-1]
                 unit_type[-1][1].args += [cur]
-                if ut != '$((':
+                if utb:
                     cur = unit_type[-1][1]
                     cur.trim()
                     unit_type = unit_type[:-1]
                     unit_type[-1][1].args += [cur]
                 #unit_type[-1][1].args += [arg]
-            elif arg == '&&':
+            elif arg in ['&&', "||", "|", "&", "\n", ";"]:
                 if unit_type[-1][0] == "[[":
                     unit_type[-1][1].args += [arg]
                 else:
@@ -248,10 +260,10 @@ class Shell:
                     unit_type = unit_type[:-1]
                     unit_type[-1][1].args += [cur]
                     unit_type += [["",Command()]]
-            elif arg in ["&",";","|","\n"]:
-                unit_type[-1][1].end = arg
-                self.lines += [unit_type[-1][1]]
-                unit_type = unit_type[:-1] + [["",Command()]]
+            #elif arg in ["&",";","|","\n"]:
+            #    unit_type[-1][1].end = arg
+            #    self.lines += [unit_type[-1][1]]
+            #    unit_type = unit_type[:-1] + [["",Command()]]
             elif arg == '<<':
                 off = 1
                 if i + off < argc:
