@@ -5,13 +5,17 @@ import os
 import sys
 import re
 from traceback import print_exc
-from termcolor import colored
+if sys.stdout.isatty():
+    from termcolor import colored
+else:
+    def colored(a,_):
+        return a
 
 def here(*args):
     import inspect
     stack = inspect.stack()
     frame = stack[1]
-    print("HERE: %s:%d" % (frame.filename, frame.lineno), *args, flush=True)
+    print(colored("HERE:","blue"),"%s:%d" % (frame.filename, frame.lineno), *args, flush=True)
     frame = None
     stack = None
 
@@ -75,6 +79,12 @@ class Text:
     def __repr__(self):
         return '"'+self.s+'"'
 
+class Var:
+    def __init__(self,s):
+        self.s = s
+    def __repr__(self):
+        return '${'+self.s+'}'
+
 class Redir:
     def __init__(self, fd_orig, mode, fd_new):
         self.fd_orig = fd_orig
@@ -110,6 +120,7 @@ class Quote:
 
 class Command:
     def __init__(self, ty="exec"):
+        self.env = {}
         self.args = []
         self.trimmed = False
         self.end = None
@@ -128,12 +139,73 @@ class Command:
             self.type = "test2"
         assert re.match(r'^\w+$',self.type)
 
+    def find_env(self):
+        i = 0
+        lhs = None
+        rhs = []
+        spaces = 0
+        while i+1 < len(self.args):
+            if self.args[i+1] == '=' and type(self.args[i]) == str:
+                lhs = self.args[i]
+                i += 1
+                while i < len(self.args):
+                    if isinstance(self.args[i],Space):
+                        if lhs is not None:
+                            self.env[lhs] = rhs[1:]
+                            lhs = None
+                            rhs = []
+                            break
+                    else:
+                        rhs += [self.args[i]]
+                    i += 1
+            else:
+                break
+            i += 1
+        self.args = self.args[i:]
+        if len(self.env)==0 and len(self.args)==0 and lhs is not None:
+            self.args = [lhs]+rhs
+            self.type = "set"
+            self.env = {}
+        elif lhs is not None:
+            assert False
+
     def trim(self):
+        self.find_redirects()
         self.trimmed = True
         while len(self.args) > 0 and isinstance(self.args[0],Space):
             self.args = self.args[1:]
         while len(self.args) > 0 and isinstance(self.args[-1],Space):
             self.args = self.args[:-1]
+        self.find_env()
+
+    def find_redirects(self):
+        i = 0
+        nargs = []
+        while i < len(self.args):
+            arg = self.args[i]
+            if arg == "<" and self.type == "test2":
+                nargs += [arg]
+            elif arg in ["<", ">", ">>", "1>", "&>", ">&"]:
+                post = 1
+                post_fd = []
+                if i+post < len(self.args) and isinstance(self.args[i+post],Space):
+                    post += 1
+                while i+post < len(self.args) and not isinstance(self.args[i+post],Space):
+                    post_fd += [self.args[i+post]]
+                    post += 1
+                redir = Redir(None, arg, "".join(post_fd))
+                self.redirects += [redir]
+                i += post
+            elif arg == "2>&1":
+                redir = Redir(2,">",1)
+                self.redirects += [redir]
+            elif arg in ["1>&2", ">&2"]:
+                redir = Redir(1,">",2)
+                self.redirects += [redir]
+            else:
+                nargs += [arg]
+            i += 1
+        self.args = nargs
 
     def pr(self,indent=0):
         if self.trimmed:
@@ -141,6 +213,8 @@ class Command:
         else:
             tr = ""
         print(" "*indent,"Command",tr,":",sep='')
+        if len(self.env) > 0:
+            print(" "*(indent+2),"Env: ",self.env,sep='')
         print(" "*indent,"  type: ",self.type,sep='')
         print(" "*indent,"  args=[",sep='')
         for i in range(len(self.args)):
@@ -158,20 +232,21 @@ class Command:
             for i in range(len(self.redirects)):
                 print(" "*(indent+4),self.redirects[i])
             print(" "*(indent+2),"],",sep='')
-        print(" "*(indent+2),"end: ",self.end,sep='')
+        if self.end is not None and self.end != '\n':
+            print(" "*(indent+2),"end: ",self.end,sep='')
         print(" "*indent,"]",sep='',end='')
         if indent==0:
             print()
 
     def __repr__(self):
-        s = "Command(args="+str(self.args)+",end="
-        if self.end == '\n':
-            s += '\\n'
-        else:
-            s += str(self.end)
+        s = "Command(type="+self.type+",args="+str(self.args)
+        if self.end is not None and self.end != '\n':
+            ",end="+str(self.end)
         if self.end_symbol is not None:
             s += f",end_symbol={self.end_symbol}"
-        s += ",redirects="+str(self.redirects)+")"
+        if len(self.redirects)>0:
+            s += ",redirects="+str(self.redirects)
+        s += ")"
         return s
 
 class Shell:
@@ -182,6 +257,68 @@ class Shell:
         self.show = 0
         self.end_symbol = None
         self.multi_line_input = ""
+        self.vars = {}
+        self.exports = {}
+
+    def create_file(self, fname):
+        here("creating file:",fname)
+        return open(fname, "w")
+
+    def read_file(self, fname):
+        here("reading file:",fname)
+        return open(fname, "r")
+
+    def run(self, cmd, redirs=[]):
+        if len(cmd) == 0:
+            return "", "", -1
+        if len(cmd[0]) == 0:
+            return "", "", -1
+        if cmd[0] in ["if", "then", "fi"]:
+            return "", "", -1
+        here("run:",cmd)
+        sout = sys.stdout
+        serr = sys.stderr
+        sin = PIPE
+        for r in redirs:
+            if r.fd_orig is None and r.mode == '>':
+                sout = self.create_file(r.fd_new)
+            elif r.fd_orig == 2 and r.mode == '>' and r.fd_new == 1:
+                serr = sout
+            elif r.fd_orig == 1 and r.mode == '>' and r.fd_new == 2:
+                sout = serr
+            elif r.fd_orig is None and r.mode == '<':
+                sin = self.read_file(r.fd_new)
+            else:
+                here(r)
+                raise Exception()
+        p = Popen(cmd, stdin=sin, stdout=sout, stderr=serr, universal_newlines=True)
+        out, err = p.communicate("")
+        here("out:",out)
+        here("err:",err)
+        return out, err, p.returncode
+
+    def execute(self, cmd):
+        if cmd.type == "set":
+            s = ''
+            for a in cmd.args[2:]:
+                if isinstance(a,Command):
+                    s += self.execute(a)
+                else:
+                    s += str(a)
+            self.vars[cmd.args[0]] = s
+        elif cmd.type == "exec":
+            nargs = [""]
+            for a in cmd.args:
+                if isinstance(a,Command):
+                    self.execute(a)
+                elif isinstance(a,Space):
+                    nargs += [""]
+                elif isinstance(a,Var):
+                    if a.s in self.vars:
+                        nargs[-1] += self.vars[a.s]
+                else:
+                    nargs[-1] += str(a)
+            out, err, rc = self.run(nargs, cmd.redirects)
 
     def assemble(self, args):
         i=0
@@ -319,6 +456,7 @@ class Shell:
             if cmd.strip() == self.end_symbol:
                 self.store = ''
                 self.lines[-1].redirects += [Redir(sys.stdin, "r", Text(self.multi_line_input))]
+                self.show = len(self.lines)-1
                 self.do_show()
                 self.multi_line_input = ''
                 self.end_symbol = None
@@ -326,11 +464,12 @@ class Shell:
                 self.multi_line_input += cmd
         else:
             cmd = self.store + cmd
-            if cmd[-1] == '\\':
-                self.store = self.store + cmd
+            g = re.search(r'\\(\r\n|\n|\r|)$',cmd)
+            if g:
+                self.store = self.store + cmd[:g.start()]
                 return
             args = []
-            for g in re.finditer(r'"((\\.|[^"\\])*)"|\'((\\.|[^\'\\])*)\'|&&|\|\||<<|>>|#.*|([ \t]+)|[\w\.-]+|\$\w+|\$\{\w+\}|\$\(\(?|\[\[|\]\]|&\d+|\\.|.|\n', cmd.strip()):
+            for g in re.finditer(r'"((\\.|[^"\\])*)"|\'((\\.|[^\'\\])*)\'|&&|\|\||<<|>>|<&|&<|\d?>(?:&\d|)|#.*|([ \t]+)|[\w\.-]+|\$(\w+)|\$\{(\w+)\}|\$\(\(?|\[\[|\]\]|\\.|.|\n', cmd.strip()):
                 item = g.group(0)
                 if item == '':
                     pass
@@ -342,6 +481,10 @@ class Shell:
                     args += [Quote(g.group(3),False)]
                 elif g.group(5) is not None:
                     args += [Space(g.group(5))]
+                elif g.group(6) is not None:
+                    args += [Var(g.group(6))]
+                elif g.group(7) is not None:
+                    args += [Var(g.group(7))]
                 else:
                     args += [item]
             self.assemble(args)
@@ -353,6 +496,7 @@ class Shell:
         for line in self.lines[self.show:]:
             #print(line)
             line.pr()
+            self.execute(line)
         self.show = len(self.lines)
 
 args = sys.argv[1:]
