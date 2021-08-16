@@ -4,6 +4,7 @@ from subprocess import Popen, PIPE, STDOUT, call
 import os
 import sys
 import re
+import io
 from traceback import print_exc
 if sys.stdout.isatty():
     from termcolor import colored
@@ -259,6 +260,8 @@ class Shell:
         self.multi_line_input = ""
         self.vars = {}
         self.exports = {}
+        self.stdout = sys.stdout
+        self.stderr = sys.stderr
 
     def create_file(self, fname):
         here("creating file:",fname)
@@ -276,8 +279,8 @@ class Shell:
         if cmd[0] in ["if", "then", "fi"]:
             return "", "", -1
         here("run:",cmd)
-        sout = sys.stdout
-        serr = sys.stderr
+        sout = self.stdout
+        serr = self.stderr
         sin = PIPE
         for r in redirs:
             if r.fd_orig is None and r.mode == '>':
@@ -285,17 +288,17 @@ class Shell:
             elif r.fd_orig == 2 and r.mode == '>' and r.fd_new == 1:
                 serr = sout
             elif r.fd_orig == 1 and r.mode == '>' and r.fd_new == 2:
+                here()
                 sout = serr
             elif r.fd_orig is None and r.mode == '<':
                 sin = self.read_file(r.fd_new)
             else:
                 here(r)
                 raise Exception()
+        here(cmd)
         p = Popen(cmd, stdin=sin, stdout=sout, stderr=serr, universal_newlines=True)
-        out, err = p.communicate("")
-        here("out:",out)
-        here("err:",err)
-        return out, err, p.returncode
+        p.communicate("")
+        return p.returncode
 
     def execute(self, cmd):
         if cmd.type == "set":
@@ -306,11 +309,18 @@ class Shell:
                 else:
                     s += str(a)
             self.vars[cmd.args[0]] = s
-        elif cmd.type == "exec":
+        elif cmd.type == "calc":
+            return eval(" ".join(cmd.args))
+        elif cmd.type in ["exec", "evalproc"]:
+            if cmd.type == "evalproc":
+                sav = self.stdout
+                tmpfile = f"/tmp/tmp.{os.getpid()}.txt"
+                stio = open(tmpfile, "w")
+                self.stdout = stio
             nargs = [""]
             for a in cmd.args:
                 if isinstance(a,Command):
-                    self.execute(a)
+                    nargs[-1] += str(self.execute(a))
                 elif isinstance(a,Space):
                     nargs += [""]
                 elif isinstance(a,Var):
@@ -318,7 +328,16 @@ class Shell:
                         nargs[-1] += self.vars[a.s]
                 else:
                     nargs[-1] += str(a)
-            out, err, rc = self.run(nargs, cmd.redirects)
+            rc = self.run(nargs, cmd.redirects)
+            if cmd.type == "evalproc":
+                stio.close()
+                if self.stdout == stio:
+                    self.stdout = sav
+                with open(tmpfile,"r") as fd:
+                    rv = fd.read().strip()
+                    here("rv:",rv)
+                    return rv
+        return ''
 
     def assemble(self, args):
         i=0
@@ -502,6 +521,8 @@ class Shell:
 args = sys.argv[1:]
 vartable["0"] = sys.argv[0]
 shell = Shell()
+shell.stdout = open("out.txt", "w")
+shell.stderr = open("err.txt", "w")
 for i in range(len(args)):
     a = args[i]
     with open(a,"r") as fd:
@@ -509,5 +530,7 @@ for i in range(len(args)):
         for line in fd.readlines():
             print()
             print("LINE:",line.strip())
+            print("LINE:",line.strip(),file=shell.stdout,flush=True)
+            print("LINE:",line.strip(),file=shell.stderr,flush=True)
             shell.process_input(line)
         break
