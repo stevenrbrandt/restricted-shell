@@ -6,9 +6,26 @@ import sys
 import re
 import io
 from traceback import print_exc
-if sys.stdout.isatty():
-    from termcolor import colored
-else:
+
+use_color = False
+try:
+    # Determine if we are in a Jupyter notebook....
+    import ipykernel
+    if type(sys.stdout) == ipykernel.iostream.OutStream:
+        use_color = True
+except:
+    if sys.stdout.isatty():
+        # If we are in an interactive shell...
+        use_color = True
+
+try:
+    if use_color:
+        # Attempt to load the function
+        from termcolor import colored
+except:
+    use_color = False
+
+if not use_color:
     def colored(a,_):
         return a
 
