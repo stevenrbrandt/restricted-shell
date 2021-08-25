@@ -1,4 +1,22 @@
 #!/usr/bin/env python3 
+from time import time
+tm = time()
+
+def here(*args):
+    import inspect
+    stack = inspect.stack()
+    frame = stack[1]
+    print("HERE:","%s:%d" % (frame.filename, frame.lineno), *args, flush=True)
+    frame = None
+    stack = None
+
+def ttrack():
+    global tm
+    new_tm = time()
+    diff = new_tm - tm
+    tm = new_tm
+    return "ttrack: %.2f" % diff
+
 from Piraha import parse_peg_src, Matcher
 from subprocess import Popen, PIPE, STDOUT, call
 import os
@@ -8,34 +26,18 @@ import io
 from traceback import print_exc
 
 use_color = False
-try:
-    # Determine if we are in a Jupyter notebook....
-    import ipykernel
-    if type(sys.stdout) == ipykernel.iostream.OutStream:
-        use_color = True
-except:
-    if sys.stdout.isatty():
-        # If we are in an interactive shell...
-        use_color = True
+# Determine if we are in a Jupyter notebook or have a terminal
+if sys.stdout.isatty() or (hasattr(sys.stdout,"__module__") and sys.stdout.__module__ == "ipykernel.iostream"):
+    use_color = True
 
-try:
-    if use_color:
-        # Attempt to load the function
-        from termcolor import colored
-except:
-    use_color = False
+if use_color:
+    # Attempt to load the function...
+    from termcolor import colored
 
 if not use_color:
     def colored(a,_):
         return a
 
-def here(*args):
-    import inspect
-    stack = inspect.stack()
-    frame = stack[1]
-    print(colored("HERE:","blue"),"%s:%d" % (frame.filename, frame.lineno), *args, flush=True)
-    frame = None
-    stack = None
 
 class ExitShell(Exception):
     def __init__(self, rc):
@@ -269,13 +271,14 @@ class Command:
 
 class Shell:
     def __init__(self):
+        self.if_stack = []
         self.lines = []
         self.program = []
         self.store = ''
         self.show = 0
         self.end_symbol = None
         self.multi_line_input = ""
-        self.vars = {}
+        self.vars = {"?":"0"}
         self.exports = {}
         self.stdout = sys.stdout
         self.stderr = sys.stderr
@@ -288,14 +291,51 @@ class Shell:
         here("reading file:",fname)
         return open(fname, "r")
 
+    def can_run(self):
+        if len(self.if_stack) == 0:
+            return True
+        elif self.if_stack[-1] == "0":
+            return True
+        else:
+            return False
+
     def run(self, cmd, redirs=[]):
         if len(cmd) == 0:
             return "", "", -1
         if len(cmd[0]) == 0:
             return "", "", -1
-        if cmd[0] in ["if", "then", "fi"]:
-            return "", "", -1
-        here("run:",cmd)
+
+        # Basic logic for if/then/else/fi follows
+        if cmd[0] == "if":
+            if self.can_run():
+                self.if_stack += ["?"]
+            else:
+                self.if_stack += ["X"]
+            if self.if_stack[-1] == "?" and len(cmd)==2 and cmd[1] in ["1", "0"]:
+                self.if_stack[-1] = cmd[1]
+                self.vars["?"] = cmd[1]
+                return
+            cmd = cmd[1:]
+        elif cmd[0] == "then":
+            #self.if_stack[-1] = self.vars["?"]
+            cmd = cmd[1:]
+        elif cmd[0] == "else":
+            assert self.if_stack[-1] != "?"
+            if self.if_stack[-1] == "X":
+                pass
+            elif self.if_stack[-1] == "0":
+                self.if_stack[-1] = "1"
+            elif self.if_stack[-1] == "1":
+                self.if_stack[-1] = "0"
+            else:
+                raise Exception()
+            cmd = cmd[1:]
+        elif cmd[0] == "fi":
+            self.if_stack = if_stack[1:-1]
+            assert len(cmd)==1
+            return
+        if not self.can_run():
+            return
         sout = self.stdout
         serr = self.stderr
         sin = PIPE
@@ -305,17 +345,22 @@ class Shell:
             elif r.fd_orig == 2 and r.mode == '>' and r.fd_new == 1:
                 serr = sout
             elif r.fd_orig == 1 and r.mode == '>' and r.fd_new == 2:
-                here()
                 sout = serr
             elif r.fd_orig is None and r.mode == '<':
                 sin = self.read_file(r.fd_new)
             else:
                 here(r)
                 raise Exception()
-        here(cmd)
+        # No command to execute, empty line
+        if len(cmd) == 0:
+            return 0
         p = Popen(cmd, stdin=sin, stdout=sout, stderr=serr, universal_newlines=True)
         p.communicate("")
-        return p.returncode
+        r = p.returncode
+        if r is None:
+            r = 0
+        self.vars["?"] = str(r)
+        return r
 
     def execute(self, cmd):
         if cmd.type == "set":
@@ -326,6 +371,20 @@ class Shell:
                 else:
                     s += str(a)
             self.vars[cmd.args[0]] = s
+        elif cmd.type == "test":
+            if len(cmd.args) == 5 and isinstance(cmd.args[1],Space) and isinstance(cmd.args[3],Space):
+                if cmd.args[2] == "=":
+                    if cmd.args[0] == cmd.args[4]:
+                        return 0
+                    else:
+                        return 1
+                elif cmd.args[2] == "!=":
+                    if cmd.args[0] == cmd.args[4]:
+                        return 1
+                    else:
+                        return 0
+            here("test not yet covered:",cmd.args)
+            raise Exception()
         elif cmd.type == "calc":
             return eval(" ".join(cmd.args))
         elif cmd.type in ["exec", "evalproc"]:
@@ -352,7 +411,6 @@ class Shell:
                     self.stdout = sav
                 with open(tmpfile,"r") as fd:
                     rv = fd.read().strip()
-                    here("rv:",rv)
                     return rv
         return ''
 
